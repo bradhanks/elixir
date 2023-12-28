@@ -609,8 +609,8 @@ defmodule Stream do
 
   """
   @spec map(Enumerable.t(), (element -> any)) :: Enumerable.t()
-  def map(enum, fun) when is_function(fun, 1) do
-    lazy(enum, fn f1 -> R.map(fun, f1) end)
+  def map(enum, mapper) when is_function(mapper, 1) do
+    lazy(enum, fn f1 -> R.map(mapper, f1) end)
   end
 
   @doc """
@@ -638,16 +638,16 @@ defmodule Stream do
   """
   @doc since: "1.4.0"
   @spec map_every(Enumerable.t(), non_neg_integer, (element -> any)) :: Enumerable.t()
-  def map_every(enum, nth, fun) when is_integer(nth) and nth >= 0 and is_function(fun, 1) do
-    map_every_after_guards(enum, nth, fun)
+  def map_every(enum, nth, mapper) when is_integer(nth) and nth >= 0 and is_function(mapper, 1) do
+    map_every_after_guards(enum, nth, mapper)
   end
 
-  defp map_every_after_guards(enum, 1, fun), do: map(enum, fun)
-  defp map_every_after_guards(enum, 0, _fun), do: %Stream{enum: enum}
-  defp map_every_after_guards([], _nth, _fun), do: %Stream{enum: []}
+  defp map_every_after_guards(enum, 1, mapper), do: map(enum, mapper)
+  defp map_every_after_guards(enum, 0, _mapper), do: %Stream{enum: enum}
+  defp map_every_after_guards([], _nth, _mapper), do: %Stream{enum: []}
 
-  defp map_every_after_guards(enum, nth, fun) do
-    lazy(enum, nth, fn f1 -> R.map_every(nth, fun, f1) end)
+  defp map_every_after_guards(enum, nth, mapper) do
+    lazy(enum, nth, fn f1 -> R.map_every(nth, mapper, f1) end)
   end
 
   @doc """
