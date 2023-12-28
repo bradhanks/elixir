@@ -486,10 +486,10 @@ defmodule Stream do
   end
 
   @doc """
-  Maps the given `fun` over `enumerable` and flattens the result.
+  Maps the given `fun` over `enum` and flattens the result.
 
   This function returns a new stream built by appending the result of invoking `fun`
-  on each element of `enumerable` together.
+  on each element of `enum` together.
 
   ## Examples
 
@@ -917,10 +917,10 @@ defmodule Stream do
     &do_transform(enum, start_fun, reducer, &1, &2, last_fun, after_fun)
   end
 
-  defp do_transform(enumerables, user_acc, user, inner_acc, fun, last_fun, after_fun) do
+  defp do_transform(enums, user_acc, user, inner_acc, fun, last_fun, after_fun) do
     inner = &do_transform_each(&1, &2, fun)
     step = &do_transform_step(&1, &2)
-    next = &Enumerable.reduce(enumerables, &1, step)
+    next = &Enumerable.reduce(enums, &1, step)
     funs = {user, fun, inner, last_fun, after_fun}
     do_transform(user_acc.(), :cont, next, inner_acc, funs)
   end
@@ -1172,8 +1172,8 @@ defmodule Stream do
 
   """
   @spec concat(Enumerable.t()) :: Enumerable.t()
-  def concat(enumerables) do
-    flat_map(enumerables, & &1)
+  def concat(enums) do
+    flat_map(enums, & &1)
   end
 
   @doc """
@@ -1200,7 +1200,7 @@ defmodule Stream do
   @doc """
   Zips two enumerables together, lazily.
 
-  The zipping finishes as soon as either enumerable completes.
+  The function terminates when either of the enumerables is fully traversed.
 
   ## Examples
 
@@ -1211,8 +1211,8 @@ defmodule Stream do
 
   """
   @spec zip(Enumerable.t(), Enumerable.t()) :: Enumerable.t()
-  def zip(enumerable1, enumerable2) do
-    zip_with(enumerable1, enumerable2, fn left, right -> {left, right} end)
+  def zip(enum1, enum2) do
+    zip_with(enum1, enum2, fn left, right -> {left, right} end)
   end
 
   @doc """
@@ -1230,17 +1230,17 @@ defmodule Stream do
 
   """
   @doc since: "1.4.0"
-  @spec zip(enumerables) :: Enumerable.t() when enumerables: [Enumerable.t()] | Enumerable.t()
-  def zip(enumerables) do
-    zip_with(enumerables, &List.to_tuple(&1))
+  @spec zip(enums) :: Enumerable.t() when enumerables: [Enumerable.t()] | Enumerable.t()
+  def zip(enums) do
+    zip_with(enums, &List.to_tuple(&1))
   end
 
   @doc """
   Lazily zips corresponding elements from two enumerables into a new one, transforming them with
   the `zip_fun` function as it goes.
 
-  The `zip_fun` will be called with the first element from `enumerable1` and the first
-  element from `enumerable2`, then with the second element from each, and so on until
+  The `zip_fun` will be called with the first element from `enum1` and the first
+  element from `enum2`, then with the second element from each, and so on until
   either one of the enumerables completes.
 
   ## Examples
@@ -1280,9 +1280,9 @@ defmodule Stream do
   Lazily zips corresponding elements from a finite collection of enumerables into a new
   enumerable, transforming them with the `zip_fun` function as it goes.
 
-  The first element from each of the enums in `enumerables` will be put into a list which is then passed to
+  The first element from each of the enums in `enums` will be put into a list which is then passed to
   the one-arity `zip_fun` function. Then, the second elements from each of the enums are put into a list and passed to
-  `zip_fun`, and so on until any one of the enums in `enumerables` completes.
+  `zip_fun`, and so on until any one of the enums in `enums` completes.
 
   Returns a new enumerable with the results of calling `zip_fun`.
 
@@ -1298,28 +1298,28 @@ defmodule Stream do
 
   """
   @doc since: "1.12.0"
-  @spec zip_with(enumerables, (Enumerable.t() -> term)) :: Enumerable.t()
-        when enumerables: [Enumerable.t()] | Enumerable.t()
-  def zip_with(enumerables, zip_fun) when is_function(zip_fun, 1) do
-    if is_list(enumerables) and :lists.all(&is_list/1, enumerables) do
-      &zip_list(enumerables, &1, &2, zip_fun)
+  @spec zip_with(enums, (Enumerable.t() -> term)) :: Enumerable.t()
+        when enums: [Enumerable.t()] | Enumerable.t()
+  def zip_with(enums, zip_fun) when is_function(zip_fun, 1) do
+    if is_list(enums) and :lists.all(&is_list/1, enums) do
+      &zip_list(enums, &1, &2, zip_fun)
     else
-      &zip_enum(enumerables, &1, &2, zip_fun)
+      &zip_enum(enums, &1, &2, zip_fun)
     end
   end
 
-  defp zip_list(_enumerables, {:halt, acc}, _fun, _zip_fun) do
+  defp zip_list(_enums, {:halt, acc}, _fun, _zip_fun) do
     {:halted, acc}
   end
 
-  defp zip_list(enumerables, {:suspend, acc}, fun, zip_fun) do
-    {:suspended, acc, &zip_list(enumerables, &1, fun, zip_fun)}
+  defp zip_list(enums, {:suspend, acc}, fun, zip_fun) do
+    {:suspended, acc, &zip_list(enums, &1, fun, zip_fun)}
   end
 
   defp zip_list([], {:cont, acc}, _fun, _zip_fun), do: {:done, acc}
 
-  defp zip_list(enumerables, {:cont, acc}, fun, zip_fun) do
-    case zip_list_heads_tails(enumerables, [], []) do
+  defp zip_list(enums, {:cont, acc}, fun, zip_fun) do
+    case zip_list_heads_tails(enums, [], []) do
       {heads, tails} -> zip_list(tails, fun.(zip_fun.(heads), acc), fun, zip_fun)
       :error -> {:done, acc}
     end
@@ -1337,13 +1337,13 @@ defmodule Stream do
     {:lists.reverse(heads), :lists.reverse(tails)}
   end
 
-  defp zip_enum(enumerables, acc, fun, zip_fun) do
+  defp zip_enum(enums, acc, fun, zip_fun) do
     step = fn x, acc ->
       {:suspend, :lists.reverse([x | acc])}
     end
 
     enum_funs =
-      Enum.map(enumerables, fn enum ->
+      Enum.map(enums, fn enum ->
         {&Enumerable.reduce(enum, &1, step), [], :cont}
       end)
 
@@ -1439,8 +1439,7 @@ defmodule Stream do
   ## Sources
 
   @doc """
-  Creates a stream that cycles through the given enumerable,
-  infinitely.
+  Generates an infinite stream by continuously cycling through the given enumerable.
 
   ## Examples
 
@@ -1450,23 +1449,23 @@ defmodule Stream do
 
   """
   @spec cycle(Enumerable.t()) :: Enumerable.t()
-  def cycle(enumerable)
+  def cycle(enum)
 
   def cycle([]) do
     raise ArgumentError, "cannot cycle over an empty enumerable"
   end
 
-  def cycle(enumerable) when is_list(enumerable) do
-    unfold({enumerable, enumerable}, fn
+  def cycle(enum) when is_list(enum) do
+    unfold({enum, enumerable}, fn
       {source, [h | t]} -> {h, {source, t}}
       {source = [h | t], []} -> {h, {source, t}}
     end)
   end
 
-  def cycle(enumerable) do
+  def cycle(enum) do
     fn acc, fun ->
       step = &do_cycle_step(&1, &2)
-      cycle = &Enumerable.reduce(enumerable, &1, step)
+      cycle = &Enumerable.reduce(enum, &1, step)
       reduce = check_cycle_first_element(cycle)
       do_cycle(reduce, [], cycle, acc, fun)
     end
@@ -1777,8 +1776,8 @@ defmodule Stream do
   """
   @doc since: "1.6.0"
   @spec intersperse(Enumerable.t(), any) :: Enumerable.t()
-  def intersperse(enumerable, intersperse_element) do
-    Stream.transform(enumerable, false, fn
+  def intersperse(enum, intersperse_element) do
+    Stream.transform(enum, false, fn
       element, true -> {[intersperse_element, element], true}
       element, false -> {[element], true}
     end)
