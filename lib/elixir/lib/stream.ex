@@ -614,7 +614,7 @@ defmodule Stream do
   end
 
   @doc """
-  Creates a stream that will apply the given function on
+  Creates a stream that will apply the given `mapper` function on
   every `nth` element from the enumerable.
 
   The first element is always passed to the given function.

@@ -1236,9 +1236,9 @@ defmodule Enum do
   end
 
   @doc """
-  Maps the given `fun` over `enumerable` and flattens the result.
+  Maps the given `mapper` over `enumerable` and flattens the result.
 
-  This function returns a new enumerable built by appending the result of invoking `fun`
+  This function returns a new enumerable built by appending the result of invoking `mapper`
   on each element of `enumerable` together; conceptually, this is similar to a
   combination of `map/2` and `concat/1`.
 
@@ -1255,13 +1255,13 @@ defmodule Enum do
 
   """
   @spec flat_map(t, (element -> t)) :: list
-  def flat_map(enumerable, fun) when is_list(enumerable) do
-    flat_map_list(enumerable, fun)
+  def flat_map(enumerable, mapper) when is_list(enumerable) do
+    flat_map_list(enumerable, mapper)
   end
 
-  def flat_map(enumerable, fun) do
+  def flat_map(enumerable, mapper) do
     reduce(enumerable, [], fn entry, acc ->
-      case fun.(entry) do
+      case mapper.(entry) do
         list when is_list(list) -> [list | acc]
         other -> [to_list(other) | acc]
       end
@@ -1275,10 +1275,10 @@ defmodule Enum do
   @doc """
   Maps and reduces an `enumerable`, flattening the given results (only one level deep).
 
-  It expects an accumulator and a function that receives each enumerable
-  element, and must return a tuple containing a new enumerable (often a list)
-  with the new accumulator or a tuple with `:halt` as first element and
-  the accumulator as second.
+  It expects an accumulator and a mapper function that receives each enumerable
+  element along with the accumulator. It returns one of two possible tuple pairs:
+  a new enumerable (often a list) and a new accumulator, or
+  `:halt` as first element and the accumulator as the second.
 
   ## Examples
 
@@ -1293,12 +1293,12 @@ defmodule Enum do
       {[[1], [2], [3], [4], [5]], 15}
 
   """
-  @spec flat_map_reduce(t, acc, fun) :: {[any], acc}
-        when fun: (element, acc -> {t, acc} | {:halt, acc})
-  def flat_map_reduce(enumerable, acc, fun) do
+  @spec flat_map_reduce(t, acc, mapper) :: {[any], acc}
+        when mapper: (element, acc -> {t, acc} | {:halt, acc})
+  def flat_map_reduce(enumerable, acc, mapper) do
     {_, {list, acc}} =
       Enumerable.reduce(enumerable, {:cont, {[], acc}}, fn entry, {list, acc} ->
-        case fun.(entry, acc) do
+        case mapper.(entry, acc) do
           {:halt, acc} ->
             {:halt, {list, acc}}
 
@@ -1680,45 +1680,48 @@ defmodule Enum do
 
   @doc """
   Returns a list where each element is the result of invoking
-  `fun` on each corresponding element of `enumerable`.
+  `mapper` on each corresponding element of `enumerable`.
 
-  For maps, the function expects a key-value tuple.
+  For maps and keyword lists, the function expects a key-value tuple.
 
   ## Examples
 
       iex> Enum.map([1, 2, 3], fn x -> x * 2 end)
       [2, 4, 6]
 
+      iex> Enum.map(%{a: 1, b: 2}, fn {k, v} -> {k, -v} end)
+      [a: -1, b: -2]
+
       iex> Enum.map([a: 1, b: 2], fn {k, v} -> {k, -v} end)
       [a: -1, b: -2]
 
   """
   @spec map(t, (element -> any)) :: list
-  def map(enumerable, fun)
+  def map(enumerable, mapper)
 
-  def map(enumerable, fun) when is_list(enumerable) do
-    :lists.map(fun, enumerable)
+  def map(enumerable, mapper) when is_list(enumerable) do
+    :lists.map(mapper, enumerable)
   end
 
-  def map(first..last//step, fun) do
-    map_range(first, last, step, fun)
+  def map(first..last//step, mapper) do
+    map_range(first, last, step, mapper)
   end
 
-  def map(enumerable, fun) do
-    reduce(enumerable, [], R.map(fun)) |> :lists.reverse()
+  def map(enumerable, mapper) do
+    reduce(enumerable, [], R.map(mapper)) |> :lists.reverse()
   end
 
   @doc """
-  Returns a list of results of invoking `fun` on every `nth`
+  Returns a list of results of invoking `mapper` on every `nth`
   element of `enumerable`, starting with the first element.
 
-  The first element is always passed to the given function, unless `nth` is `0`.
+  The first element is passed to the given function, unless `nth` is `0`.
 
-  The second argument specifying every `nth` element must be a non-negative
+  The second argument specifies every `nth` element and must be a non-negative
   integer.
 
   If `nth` is `0`, then `enumerable` is directly converted to a list,
-  without `fun` being ever applied.
+  without `mapper` ever being applied.
 
   ## Examples
 
@@ -1737,14 +1740,14 @@ defmodule Enum do
   """
   @doc since: "1.4.0"
   @spec map_every(t, non_neg_integer, (element -> any)) :: list
-  def map_every(enumerable, nth, fun)
+  def map_every(enumerable, nth, mapper)
 
-  def map_every(enumerable, 1, fun), do: map(enumerable, fun)
-  def map_every(enumerable, 0, _fun), do: to_list(enumerable)
-  def map_every([], nth, _fun) when is_integer(nth) and nth > 1, do: []
+  def map_every(enumerable, 1, mapper), do: map(enumerable, mapper)
+  def map_every(enumerable, 0, _mapper), do: to_list(enumerable)
+  def map_every([], nth, _mapper) when is_integer(nth) and nth > 1, do: []
 
-  def map_every(enumerable, nth, fun) when is_integer(nth) and nth > 1 do
-    {res, _} = reduce(enumerable, {[], :first}, R.map_every(nth, fun))
+  def map_every(enumerable, nth, mapper) when is_integer(nth) and nth > 1 do
+    {res, _} = reduce(enumerable, {[], :first}, R.map_every(nth, mapper))
     :lists.reverse(res)
   end
 
