@@ -1230,7 +1230,7 @@ defmodule Stream do
 
   """
   @doc since: "1.4.0"
-  @spec zip(enums) :: Enumerable.t() when enumerables: [Enumerable.t()] | Enumerable.t()
+  @spec zip(enums) :: Enumerable.t() when enums: [Enumerable.t()] | Enumerable.t()
   def zip(enums) do
     zip_with(enums, &List.to_tuple(&1))
   end
@@ -1252,13 +1252,13 @@ defmodule Stream do
   """
   @doc since: "1.12.0"
   @spec zip_with(Enumerable.t(), Enumerable.t(), (term, term -> term)) :: Enumerable.t()
-  def zip_with(enumerable1, enumerable2, zip_fun)
-      when is_list(enumerable1) and is_list(enumerable2) and is_function(zip_fun, 2) do
-    &zip_pair(enumerable1, enumerable2, &1, &2, zip_fun)
+  def zip_with(enum1, enum2, zip_fun)
+      when is_list(enum1) and is_list(enum2) and is_function(zip_fun, 2) do
+    &zip_pair(enum1, enum2, &1, &2, zip_fun)
   end
 
-  def zip_with(enumerable1, enumerable2, zip_fun) when is_function(zip_fun, 2) do
-    zip_with([enumerable1, enumerable2], fn [left, right] -> zip_fun.(left, right) end)
+  def zip_with(enum1, enum2, zip_fun) when is_function(zip_fun, 2) do
+    zip_with([enum1, enum2], fn [left, right] -> zip_fun.(left, right) end)
   end
 
   defp zip_pair(_list1, _list2, {:halt, acc}, _fun, _zip_fun) do
