@@ -417,6 +417,20 @@ defmodule EnumTest do
     assert Enum.into(["H", "i"], "") == "Hi"
   end
 
+  test "into/2 exceptions" do
+    assert_raise ArgumentError,
+                 "collecting into a map requires {key, value} tuples, got: 1",
+                 fn -> Enum.into(1..10, %{}) end
+
+    assert_raise ArgumentError, "collecting into a binary requires a bitstring, got: 1", fn ->
+      Enum.into(1..10, <<>>)
+    end
+
+    assert_raise ArgumentError, "collecting into a bitstring requires a bitstring, got: 1", fn ->
+      Enum.into(1..10, <<1::1>>)
+    end
+  end
+
   test "into/3" do
     assert Enum.into([1, 2, 3], [], fn x -> x * 2 end) == [2, 4, 6]
     assert Enum.into([1, 2, 3], "numbers: ", &to_string/1) == "numbers: 123"
