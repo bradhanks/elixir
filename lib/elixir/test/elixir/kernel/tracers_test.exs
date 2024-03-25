@@ -201,6 +201,19 @@ defmodule Kernel.TracersTest do
     end
     """)
 
+    assert_receive {:defmodule, %{module: Sample, function: nil}}
+    assert_receive {{:on_module, <<_::binary>>, :none}, %{module: Sample, function: nil}}
+  after
+    :code.purge(Sample)
+    :code.delete(Sample)
+  end
+
+  test "traces dynamic modules" do
+    compile_string("""
+    Module.create(Sample, :ok, __ENV__)
+    """)
+
+    assert_receive {:defmodule, %{module: Sample, function: nil}}
     assert_receive {{:on_module, <<_::binary>>, :none}, %{module: Sample, function: nil}}
   after
     :code.purge(Sample)
@@ -215,6 +228,35 @@ defmodule Kernel.TracersTest do
 
     assert_receive {{:remote_macro, meta, Kernel, :to_string, 1}, _env}
     assert meta[:from_interpolation]
+  end
+
+  test "traces bracket access" do
+    compile_string("""
+    foo = %{bar: 3}
+    foo[:bar]
+    """)
+
+    assert_receive {{:remote_function, meta, Access, :get, 2}, _env}
+    assert meta[:from_brackets]
+
+    compile_string("""
+    defmodule Foo do
+      @foo %{bar: 3}
+      def a() do
+        @foo[:bar]
+      end
+    end
+    """)
+
+    assert_receive {{:remote_function, meta, Access, :get, 2}, _env}
+    assert meta[:from_brackets]
+
+    compile_string("""
+    %{bar: 3}[:bar]
+    """)
+
+    assert_receive {{:remote_function, meta, Access, :get, 2}, _env}
+    assert meta[:from_brackets]
   end
 
   """

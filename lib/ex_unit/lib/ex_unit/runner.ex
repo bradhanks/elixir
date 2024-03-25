@@ -42,7 +42,11 @@ defmodule ExUnit.Runner do
 
     start_time = System.monotonic_time()
     EM.suite_started(config.manager, opts)
-    async_stop_time = async_loop(config, %{}, false)
+
+    modules_to_restore =
+      if Keyword.fetch!(opts, :repeat_until_failure) > 0, do: {[], []}, else: nil
+
+    {async_stop_time, modules_to_restore} = async_loop(config, %{}, false, modules_to_restore)
     stop_time = System.monotonic_time()
 
     if max_failures_reached?(config) do
@@ -61,7 +65,7 @@ defmodule ExUnit.Runner do
     EM.stop(config.manager)
     after_suite_callbacks = Application.fetch_env!(:ex_unit, :after_suite)
     Enum.each(after_suite_callbacks, fn callback -> callback.(stats) end)
-    stats
+    {stats, modules_to_restore}
   end
 
   defp configure(opts, manager, runner_pid, stats_pid) do
@@ -92,22 +96,24 @@ defmodule ExUnit.Runner do
     |> Keyword.put(:include, include)
   end
 
-  defp async_loop(config, running, async_once?) do
+  defp async_loop(config, running, async_once?, modules_to_restore) do
     available = config.max_cases - map_size(running)
 
     cond do
       # No modules available, wait for one
       available <= 0 ->
         running = wait_until_available(config, running)
-        async_loop(config, running, async_once?)
+        async_loop(config, running, async_once?, modules_to_restore)
 
       # Slots are available, start with async modules
       modules = ExUnit.Server.take_async_modules(available) ->
         running = spawn_modules(config, modules, running)
-        async_loop(config, running, true)
+        modules_to_restore = maybe_store_modules(modules_to_restore, :async, modules)
+        async_loop(config, running, true, modules_to_restore)
 
       true ->
         sync_modules = ExUnit.Server.take_sync_modules()
+        modules_to_restore = maybe_store_modules(modules_to_restore, :sync, sync_modules)
 
         # Wait for all async modules
         0 =
@@ -123,7 +129,7 @@ defmodule ExUnit.Runner do
           running != %{} and wait_until_available(config, running)
         end
 
-        async_stop_time
+        {async_stop_time, modules_to_restore}
     end
   end
 
@@ -163,6 +169,10 @@ defmodule ExUnit.Runner do
       spawn_modules(config, modules, Map.put(running, ref, pid))
     end
   end
+
+  defp maybe_store_modules(nil, _type, _modules), do: nil
+  defp maybe_store_modules({async, sync}, :async, modules), do: {async ++ modules, sync}
+  defp maybe_store_modules({async, sync}, :sync, modules), do: {async, sync ++ modules}
 
   ## Stacktrace
 
@@ -216,8 +226,7 @@ defmodule ExUnit.Runner do
     EM.module_started(config.manager, test_module)
 
     # Prepare tests, selecting which ones should be run or skipped
-    tests = prepare_tests(config, test_module.tests)
-    {excluded_and_skipped_tests, to_run_tests} = Enum.split_with(tests, & &1.state)
+    {to_run_tests, excluded_and_skipped_tests} = prepare_tests(config, test_module.tests)
 
     for excluded_or_skipped_test <- excluded_and_skipped_tests do
       EM.test_started(config.manager, excluded_or_skipped_test)
@@ -257,14 +266,18 @@ defmodule ExUnit.Runner do
     exclude = config.exclude
     test_ids = config.only_test_ids
 
-    for test <- tests, include_test?(test_ids, test) do
-      tags = Map.merge(test.tags, %{test: test.name, module: test.module})
+    {to_run, to_skip} =
+      for test <- tests, include_test?(test_ids, test), reduce: {[], []} do
+        {to_run, to_skip} ->
+          tags = Map.merge(test.tags, %{test: test.name, module: test.module})
 
-      case ExUnit.Filters.eval(include, exclude, tags, tests) do
-        :ok -> %{test | tags: tags}
-        excluded_or_skipped -> %{test | state: excluded_or_skipped}
+          case ExUnit.Filters.eval(include, exclude, tags, tests) do
+            :ok -> {[%{test | tags: tags} | to_run], to_skip}
+            excluded_or_skipped -> {to_run, [%{test | state: excluded_or_skipped} | to_skip]}
+          end
       end
-    end
+
+    {Enum.reverse(to_run), Enum.reverse(to_skip)}
   end
 
   defp include_test?(test_ids, test) do
@@ -293,8 +306,8 @@ defmodule ExUnit.Runner do
           {test_module, invalid_tests, []}
 
         {:DOWN, ^module_ref, :process, ^module_pid, error} ->
-          invalid_tests = mark_tests_invalid(tests, test_module)
           test_module = %{test_module | state: failed({:EXIT, module_pid}, error, [])}
+          invalid_tests = mark_tests_invalid(tests, test_module)
           {test_module, invalid_tests, []}
       end
 

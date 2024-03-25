@@ -24,7 +24,7 @@ defmodule Mix.Project do
 
   ## Configuration
 
-  In order to configure Mix, the module that `use`s `Mix.Project` should export
+  In order to configure Mix, the module that calls `use Mix.Project` should export
   a `project/0` function that returns a keyword list representing configuration
   for the project.
 
@@ -324,6 +324,11 @@ defmodule Mix.Project do
   This function is usually used in compilation tasks to trigger
   a full recompilation whenever such configuration files change.
   For this reason, the mtime is cached to avoid file system lookups.
+
+  However, for effective used of this function, you must avoid
+  comparing source files with the `config_mtime` itself. Instead,
+  store the previous `config_mtime` and compare it with the new
+  `config_mtime` in order to detect if something is stale.
 
   Note: before Elixir v1.13.0, the `mix.exs` file was also included
   in the mtimes, but not anymore. You can compute its modification

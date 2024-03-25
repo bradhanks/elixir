@@ -869,7 +869,19 @@ defmodule TaskTest do
 
     test "does not allow streaming with max_concurrency = 0" do
       assert_raise ArgumentError, ":max_concurrency must be an integer greater than zero", fn ->
-        Task.async_stream([1], fn _ -> :ok end, max_concurrency: 0) |> Enum.to_list()
+        Task.async_stream([1], fn _ -> :ok end, max_concurrency: 0)
+      end
+    end
+
+    test "does not allow streaming with invalid :on_timeout" do
+      assert_raise ArgumentError, ":on_timeout must be either :exit or :kill_task", fn ->
+        Task.async_stream([1], fn _ -> :ok end, on_timeout: :unknown)
+      end
+    end
+
+    test "does not allow streaming with invalid :timeout" do
+      assert_raise ArgumentError, ":timeout must be either a positive integer or :infinity", fn ->
+        Task.async_stream([1], fn _ -> :ok end, timeout: :unknown)
       end
     end
 
@@ -1085,6 +1097,70 @@ defmodule TaskTest do
                |> Task.async_stream(&exit/1, opts)
                |> Enum.take(4) == [exit: {1, 1}, exit: {2, 2}, exit: {3, 3}, exit: {4, 4}]
       end
+    end
+  end
+
+  describe "default :logger reporter" do
+    setup do
+      translator = :logger.get_primary_config().filters[:logger_translator]
+      assert :ok = :logger.remove_primary_filter(:logger_translator)
+      on_exit(fn -> :logger.add_primary_filter(:logger_translator, translator) end)
+    end
+
+    test "logs a terminated task" do
+      parent = self()
+      {:ok, pid} = Task.start_link(__MODULE__, :task, [parent])
+
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               ref = Process.monitor(pid)
+               send(pid, :go)
+               receive do: ({:DOWN, ^ref, _, _, _} -> :ok)
+             end) =~ ~r"""
+             \[error\] \*\* Task #PID<\d+\.\d+\.\d+> terminating
+             \*\* Started from #PID<\d+\.\d+\.\d+>
+             \*\* When function  == &TaskTest.task/1
+             \*\*      arguments == \[#PID<\d+\.\d+\.\d+>\]
+             \*\* Reason for termination ==\s
+             \*\* {%RuntimeError{message: "oops"},
+             """
+    end
+
+    test "logs a terminated task with a process label" do
+      fun = fn ->
+        Process.set_label({:any, "term"})
+        raise "oops"
+      end
+
+      parent = self()
+      {:ok, pid} = Task.start_link(__MODULE__, :task, [parent, fun])
+
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               ref = Process.monitor(pid)
+               send(pid, :go)
+               receive do: ({:DOWN, ^ref, _, _, _} -> :ok)
+             end) =~ ~r"""
+             \[error\] \*\* Task #PID<\d+\.\d+\.\d+> terminating
+             \*\* Process Label == {:any, "term"}
+             \*\* Started from #PID<\d+\.\d+\.\d+>
+             \*\* When function  == &TaskTest.task/2
+             \*\*      arguments == \[#PID<\d+\.\d+\.\d+>,
+              #Function<.+>\]
+             \*\* Reason for termination ==\s
+             \*\* {%RuntimeError{message: "oops"},
+             """
+    end
+  end
+
+  def task(parent, fun \\ fn -> raise "oops" end) do
+    mon = Process.monitor(parent)
+    Process.unlink(parent)
+
+    receive do
+      :go ->
+        fun.()
+
+      {:DOWN, ^mon, _, _, _} ->
+        exit(:shutdown)
     end
   end
 end

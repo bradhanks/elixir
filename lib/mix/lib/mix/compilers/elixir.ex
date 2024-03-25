@@ -1,7 +1,7 @@
 defmodule Mix.Compilers.Elixir do
   @moduledoc false
 
-  @manifest_vsn 23
+  @manifest_vsn 25
   @checkpoint_vsn 2
 
   import Record
@@ -10,6 +10,7 @@ defmodule Mix.Compilers.Elixir do
 
   defrecord :source,
     size: 0,
+    mtime: 0,
     digest: nil,
     compile_references: [],
     export_references: [],
@@ -34,6 +35,8 @@ defmodule Mix.Compilers.Elixir do
   def compile(manifest, srcs, dest, new_cache_key, new_parent_manifests, new_parents, opts) do
     Mix.ensure_application!(:crypto)
     modified = Mix.Utils.last_modified(manifest)
+    config_mtime = Mix.Project.config_mtime()
+    project_mtime = Mix.Utils.last_modified(Mix.Project.project_file())
     new_parents = :ordsets.from_list(new_parents)
 
     # We fetch the time from before we read files so any future
@@ -42,7 +45,9 @@ defmodule Mix.Compilers.Elixir do
     timestamp = System.os_time(:second)
     all_paths = Mix.Utils.extract_files(srcs, [:ex])
 
-    {all_modules, all_sources, all_local_exports, old_parents, old_cache_key, old_deps_config} =
+    {all_modules, all_sources, all_local_exports, old_parents, old_cache_key, old_deps_config,
+     old_project_mtime,
+     old_config_mtime} =
       parse_manifest(manifest, dest)
 
     # Prepend ourselves early because of __mix_recompile__? checks
@@ -64,14 +69,14 @@ defmodule Mix.Compilers.Elixir do
 
     # If mix.exs has changed, recompile anything that calls Mix.Project.
     stale =
-      if Mix.Utils.stale?([Mix.Project.project_file()], [modified]),
+      if project_mtime > old_project_mtime,
         do: [Mix.Project | stale],
         else: stale
 
-    # If the lock has changed or a local dependency was added ore removed,
+    # If the lock has changed or a local dependency was added or removed,
     # we need to traverse lock/config files.
     deps_changed? =
-      Mix.Utils.stale?([Mix.Project.config_mtime()], [modified]) or
+      config_mtime > old_config_mtime or
         local_deps_changed?(old_deps_config, local_deps)
 
     # If a configuration is only accessed at compile-time, we don't need to
@@ -137,7 +142,6 @@ defmodule Mix.Compilers.Elixir do
       else
         compiler_info_from_updated(
           manifest,
-          modified,
           all_paths -- prev_paths,
           all_modules,
           all_sources,
@@ -191,6 +195,8 @@ defmodule Mix.Compilers.Elixir do
             new_parents,
             new_cache_key,
             new_deps_config,
+            project_mtime,
+            config_mtime,
             timestamp
           )
 
@@ -207,7 +213,6 @@ defmodule Mix.Compilers.Elixir do
           {:error, previous_warnings(sources, all_warnings) ++ warnings ++ errors}
       after
         Code.compiler_options(previous_opts)
-        Code.purge_compiler_modules()
       end
     else
       # We need to return ok if deps_changed? or stale_modules changed,
@@ -225,8 +230,7 @@ defmodule Mix.Compilers.Elixir do
       # any other change, but the diff check should be reasonably fast anyway.
       status = if removed != [] or deps_changed? or stale_modules != %{}, do: :ok, else: :noop
 
-      # If nothing changed but there is one more recent mtime, bump the manifest
-      if status != :noop or Enum.any?(Map.values(sources_stats), &(elem(&1, 0) > modified)) do
+      if status != :noop do
         write_manifest(
           manifest,
           modules,
@@ -235,6 +239,8 @@ defmodule Mix.Compilers.Elixir do
           new_parents,
           new_cache_key,
           new_deps_config,
+          project_mtime,
+          config_mtime,
           timestamp
         )
       end
@@ -281,12 +287,19 @@ defmodule Mix.Compilers.Elixir do
   @doc """
   Returns protocols and implementations for the given `manifest`.
   """
-  def protocols_and_impls(manifest, compile_path) do
-    {modules, _} = read_manifest(manifest)
+  def protocols_and_impls(paths) do
+    Enum.reduce(paths, {%{}, %{}}, fn path, acc ->
+      {modules, _} = read_manifest(Path.join(path, ".mix/compile.elixir"))
 
-    for {module, module(kind: kind)} <- modules,
-        match?(:protocol, kind) or match?({:impl, _}, kind),
-        do: {module, kind, beam_path(compile_path, module)}
+      Enum.reduce(modules, acc, fn
+        {module, module(kind: kind, timestamp: timestamp)}, {protocols, impls} ->
+          case kind do
+            :protocol -> {Map.put(protocols, module, timestamp), impls}
+            {:impl, protocol} -> {protocols, Map.put(impls, module, protocol)}
+            _ -> {protocols, impls}
+          end
+      end)
+    end)
   end
 
   @doc """
@@ -298,7 +311,7 @@ defmodule Mix.Compilers.Elixir do
     rescue
       _ -> {[], []}
     else
-      {@manifest_vsn, modules, sources, _, _, _, _} -> {modules, sources}
+      {@manifest_vsn, modules, sources, _, _, _, _, _, _} -> {modules, sources}
       _ -> {[], []}
     end
   end
@@ -329,7 +342,6 @@ defmodule Mix.Compilers.Elixir do
 
   defp compiler_info_from_updated(
          manifest,
-         modified,
          new_paths,
          all_modules,
          all_sources,
@@ -387,7 +399,8 @@ defmodule Mix.Compilers.Elixir do
     # Sources that have changed on disk or
     # any modules associated with them need to be recompiled
     changed =
-      for {source, source(external: external, size: size, digest: digest, modules: modules)} <-
+      for {source,
+           source(external: external, size: size, mtime: mtime, digest: digest, modules: modules)} <-
             all_sources,
           {last_mtime, last_size} = Map.fetch!(sources_stats, source),
           # If the user does a change, compilation fails, and then they revert
@@ -396,8 +409,8 @@ defmodule Mix.Compilers.Elixir do
           # files are available.
           size != last_size or
             Enum.any?(modules, &Map.has_key?(modules_to_recompile, &1)) or
-            Enum.any?(external, &stale_external?(&1, modified, sources_stats)) or
-            (last_mtime > modified and
+            Enum.any?(external, &stale_external?(&1, sources_stats)) or
+            (last_mtime > mtime and
                (missing_beam_file?(dest, modules) or digest_changed?(source, digest))),
           do: source
 
@@ -425,10 +438,13 @@ defmodule Mix.Compilers.Elixir do
     {modules, exports, changed, sources_stats}
   end
 
-  defp stale_external?({external, digest}, modified, sources_stats) do
+  defp stale_external?({external, {mtime, size}, digest}, sources_stats) do
     case sources_stats do
-      %{^external => {0, 0}} -> digest != nil
-      %{^external => {mtime, _}} -> mtime > modified and digest_changed?(external, digest)
+      %{^external => {0, 0}} ->
+        digest != nil
+
+      %{^external => {last_mtime, last_size}} ->
+        size != last_size or (last_mtime > mtime and digest_changed?(external, digest))
     end
   end
 
@@ -436,7 +452,7 @@ defmodule Mix.Compilers.Elixir do
     Enum.reduce(sources, %{}, fn {source, source(external: external)}, map ->
       map = Map.put_new_lazy(map, source, fn -> Mix.Utils.last_modified_and_size(source) end)
 
-      Enum.reduce(external, map, fn {file, _}, map ->
+      Enum.reduce(external, map, fn {file, _, _}, map ->
         Map.put_new_lazy(map, file, fn -> Mix.Utils.last_modified_and_size(file) end)
       end)
     end)
@@ -489,7 +505,7 @@ defmodule Mix.Compilers.Elixir do
   # so we rely on sources_stats to avoid multiple FS lookups.
   defp update_stale_sources(sources, stale, removed_modules, sources_stats) do
     Enum.reduce(stale, {sources, removed_modules}, fn file, {acc_sources, acc_modules} ->
-      %{^file => {_, size}} = sources_stats
+      %{^file => {mtime, size}} = sources_stats
 
       modules =
         case acc_sources do
@@ -498,7 +514,7 @@ defmodule Mix.Compilers.Elixir do
         end
 
       acc_modules = Enum.reduce(modules, acc_modules, &Map.put(&2, &1, true))
-      {Map.put(acc_sources, file, source(size: size)), acc_modules}
+      {Map.put(acc_sources, file, source(size: size, mtime: mtime)), acc_modules}
     end)
   end
 
@@ -830,7 +846,7 @@ defmodule Mix.Compilers.Elixir do
 
   ## Manifest handling
 
-  @default_manifest {%{}, %{}, %{}, [], nil, nil}
+  @default_manifest {%{}, %{}, %{}, [], nil, nil, 0, 0}
 
   # Similar to read_manifest, but for internal consumption and with data migration support.
   defp parse_manifest(manifest, compile_path) do
@@ -840,8 +856,10 @@ defmodule Mix.Compilers.Elixir do
       _ ->
         @default_manifest
     else
-      {@manifest_vsn, modules, sources, local_exports, parent, cache_key, deps_config} ->
-        {modules, sources, local_exports, parent, cache_key, deps_config}
+      {@manifest_vsn, modules, sources, local_exports, parent, cache_key, deps_config,
+       project_mtime, config_mtime} ->
+        {modules, sources, local_exports, parent, cache_key, deps_config, project_mtime,
+         config_mtime}
 
       # {vsn, %{module => record}, sources, ...} v22-?
       # {vsn, [module_record], sources, ...} v5-v21
@@ -893,6 +911,8 @@ defmodule Mix.Compilers.Elixir do
          parents,
          cache_key,
          deps_config,
+         project_mtime,
+         config_mtime,
          timestamp
        ) do
     if modules == %{} and sources == %{} do
@@ -900,7 +920,10 @@ defmodule Mix.Compilers.Elixir do
     else
       File.mkdir_p!(Path.dirname(manifest))
 
-      term = {@manifest_vsn, modules, sources, exports, parents, cache_key, deps_config}
+      term =
+        {@manifest_vsn, modules, sources, exports, parents, cache_key, deps_config, project_mtime,
+         config_mtime}
+
       manifest_data = :erlang.term_to_binary(term, [:compressed])
       File.write!(manifest, manifest_data)
       File.touch!(manifest, timestamp)
@@ -1199,10 +1222,13 @@ defmodule Mix.Compilers.Elixir do
 
   defp process_external_resources(external, cwd) do
     for file <- external do
-      case File.read(file) do
-        {:ok, binary} -> {Path.relative_to(file, cwd), digest_contents(binary)}
-        {:error, _} -> {Path.relative_to(file, cwd), nil}
-      end
+      digest =
+        case File.read(file) do
+          {:ok, binary} -> digest_contents(binary)
+          {:error, _} -> nil
+        end
+
+      {Path.relative_to(file, cwd), Mix.Utils.last_modified_and_size(file), digest}
     end
   end
 end

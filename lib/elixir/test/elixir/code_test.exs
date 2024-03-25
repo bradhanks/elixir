@@ -275,7 +275,7 @@ defmodule CodeTest do
 
       quoted = quote(do: alias(:dict, as: MyDict))
       {:dict, [], env} = Code.eval_quoted_with_env(quoted, [], env)
-      assert Macro.Env.fetch_alias(env, :MyDict) == {:ok, :dict}
+      assert Keyword.fetch(env.aliases, Elixir.MyDict) == {:ok, :dict}
     end
 
     test "manages env vars" do
@@ -572,7 +572,7 @@ defmodule Code.SyncTest do
 
   import PathHelpers
 
-  if :erlang.system_info(:otp_release) >= ~c"26" do
+  if System.otp_release() >= "26" do
     defp assert_cached(path) do
       assert find_path(path) != :nocache
     end

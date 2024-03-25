@@ -40,7 +40,7 @@ defmodule Task do
        as they are *always* sent. If you are not expecting a reply,
        consider using `Task.start_link/1` as detailed below.
 
-    2. async tasks link the caller and the spawned process. This
+    2. Async tasks link the caller and the spawned process. This
        means that, if the caller crashes, the task will crash
        too and vice-versa. This is on purpose: if the process
        meant to receive the result no longer exists, there is
@@ -292,6 +292,17 @@ defmodule Task do
   The task opaque reference.
   """
   @opaque ref :: reference()
+
+  @typedoc """
+  Options given to `async_stream` functions.
+  """
+  @typedoc since: "1.17.0"
+  @type async_stream_option ::
+          {:max_concurrency, pos_integer()}
+          | {:ordered, boolean()}
+          | {:timeout, timeout()}
+          | {:on_timeout, :exit | :kill_task}
+          | {:zip_input_on_exit, boolean()}
 
   defguardp is_timeout(timeout)
             when timeout == :infinity or (is_integer(timeout) and timeout >= 0)
@@ -681,7 +692,8 @@ defmodule Task do
   example above.
   """
   @doc since: "1.4.0"
-  @spec async_stream(Enumerable.t(), module, atom, [term], keyword) :: Enumerable.t()
+  @spec async_stream(Enumerable.t(), module, atom, [term], [async_stream_option]) ::
+          Enumerable.t()
   def async_stream(enumerable, module, function_name, args, options \\ [])
       when is_atom(module) and is_atom(function_name) and is_list(args) do
     build_stream(enumerable, {module, function_name, args}, options)
@@ -710,13 +722,15 @@ defmodule Task do
   See `async_stream/5` for discussion, options, and more examples.
   """
   @doc since: "1.4.0"
-  @spec async_stream(Enumerable.t(), (term -> term), keyword) :: Enumerable.t()
+  @spec async_stream(Enumerable.t(), (term -> term), [async_stream_option]) :: Enumerable.t()
   def async_stream(enumerable, fun, options \\ [])
       when is_function(fun, 1) and is_list(options) do
     build_stream(enumerable, fun, options)
   end
 
   defp build_stream(enumerable, fun, options) do
+    options = Task.Supervised.validate_stream_options(options)
+
     fn acc, acc_fun ->
       owner = get_owner(self())
 

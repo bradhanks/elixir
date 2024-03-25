@@ -3,8 +3,8 @@ defmodule ExUnit.Callbacks do
   Defines ExUnit callbacks.
 
   This module defines the `setup/1`, `setup/2`, `setup_all/1`, and
-  `setup_all/2` callbacks, as well as the `on_exit/2`, `start_supervised/2`
-  and `stop_supervised/1` functions.
+  `setup_all/2` callbacks, as well as the `on_exit/2`, `start_supervised/2`,
+  `stop_supervised/1` and `start_link_supervised!/2` functions.
 
   The setup callbacks may be used to define [test fixtures](https://en.wikipedia.org/wiki/Test_fixture#Software)
   and run any initialization code which help bring the system into a known
@@ -520,6 +520,13 @@ defmodule ExUnit.Callbacks do
   See the `Supervisor` module for a discussion on child specifications
   and the available specification keys.
 
+  The started process is not linked to the test process and a crash will
+  not necessarily fail the test. To start and link a process to guarantee
+  that any crash would also fail the test use `start_link_supervised!/2`.
+
+  This function returns `{:ok, pid}` in case of success, otherwise it
+  returns `{:error, reason}`.
+
   The advantage of starting a process under the test supervisor is that
   it is guaranteed to exit before the next test starts. Therefore, you
   don't need to remove the process at the end of your tests via
@@ -528,12 +535,15 @@ defmodule ExUnit.Callbacks do
   test, as simply shutting down the process would cause it to be restarted
   according to its `:restart` value.
 
-  The started process is not linked to the test process and a crash will
-  not necessarily fail the test. To start and link a process to guarantee
-  that any crash would also fail the test use `start_link_supervised!/2`.
-
-  This function returns `{:ok, pid}` in case of success, otherwise it
-  returns `{:error, reason}`.
+  Another advantage is that the test process will act as both an ancestor
+  as well as a caller to the supervised processes. When a process is started
+  under a supervision tree, it typically populates the `$ancestors` key in
+  its process dictionary with all of its ancestors, which will include the test
+  process. Additionally, `start_supervised/2` will also store the test process
+  in the `$callers` key of the started process, allowing tools that perform
+  either ancestor or caller tracking to reach the test process. You can learn
+  more about these keys in
+  [the `Task` module](`Task#module-ancestor-and-caller-tracking`).
   """
   @doc since: "1.5.0"
   @spec start_supervised(Supervisor.child_spec() | module | {module, term}, keyword) ::
@@ -753,6 +763,10 @@ defmodule ExUnit.Callbacks do
 
     if Module.get_attribute(module, :describetag) != [] do
       raise "@describetag must be set inside describe/2 blocks"
+    end
+
+    if Module.get_attribute(module, :tag) != [] do
+      IO.warn("found unused @tag before \"describe\", did you mean to use @describetag?")
     end
 
     setup = Module.get_attribute(module, :ex_unit_setup)

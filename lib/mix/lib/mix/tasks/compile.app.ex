@@ -83,6 +83,9 @@ defmodule Mix.Tasks.Compile.App do
   The complete list can be found on [Erlang's application
   specification](https://www.erlang.org/doc/man/app).
 
+  From Elixir v1.17 onwards, the application .app file is also loaded
+  whenever the task runs.
+
   ## Command line options
 
     * `--force` - forces compilation regardless of modification times
@@ -138,15 +141,20 @@ defmodule Mix.Tasks.Compile.App do
     validate_version(version)
 
     path = Keyword.get_lazy(opts, :compile_path, &Mix.Project.compile_path/0)
-    modules = modules_from(Path.wildcard("#{path}/*.beam")) |> Enum.sort()
+    modules = modules_from(path) |> Enum.sort()
 
     target = Path.join(path, "#{app}.app")
-    sources = [Mix.Project.config_mtime(), Mix.Project.project_file()]
+
+    # We mostly depend on the project_file through the def application function,
+    # but it doesn't hurt to also include config_mtime.
+    new_mtime =
+      max(Mix.Project.config_mtime(), Mix.Utils.last_modified(Mix.Project.project_file()))
 
     current_properties = current_app_properties(target)
     compile_env = load_compile_env(current_properties)
+    old_mtime = Keyword.get(current_properties, :config_mtime, 0)
 
-    if opts[:force] || Mix.Utils.stale?(sources, [target]) ||
+    if opts[:force] || new_mtime > old_mtime ||
          app_changed?(current_properties, modules, compile_env) do
       properties =
         [
@@ -160,13 +168,16 @@ defmodule Mix.Tasks.Compile.App do
         |> handle_extra_applications(config)
         |> add_compile_env(compile_env)
 
+      properties = [config_mtime: new_mtime] ++ properties
       contents = :io_lib.format("~p.~n", [{:application, app, properties}])
+      :application.load({:application, app, properties})
 
       Mix.Project.ensure_structure()
       File.write!(target, IO.chardata_to_string(contents))
       Mix.shell().info("Generated #{app} app")
       {:ok, []}
     else
+      :application.load({:application, app, current_properties})
       {:noop, []}
     end
   end
@@ -213,8 +224,16 @@ defmodule Mix.Tasks.Compile.App do
 
   defp ensure_present(_name, _val), do: :ok
 
-  defp modules_from(beams) do
-    Enum.map(beams, &(&1 |> Path.basename() |> Path.rootname(".beam") |> String.to_atom()))
+  defp modules_from(path) do
+    case File.ls(path) do
+      {:ok, entries} ->
+        for entry <- entries,
+            String.ends_with?(entry, ".beam"),
+            do: entry |> binary_part(0, byte_size(entry) - 5) |> String.to_atom()
+
+      {:error, _} ->
+        []
+    end
   end
 
   defp merge_project_application(best_guess, project) do

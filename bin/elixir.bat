@@ -161,9 +161,7 @@ reg query HKCU\Console /v VirtualTerminalLevel 2>nul | findstr /e "0x1" >nul 2>n
 if %errorlevel% == 0 (
   set beforeExtra=-elixir ansi_enabled true !beforeExtra!
 )
-if defined useIEx (
-  set beforeExtra=-s elixir start_iex !beforeExtra!
-) else (
+if not defined useIEx (
   set beforeExtra=-s elixir start_cli !beforeExtra!
 )
 

@@ -71,7 +71,7 @@ expand({alias, Meta, [Ref, Opts]}, S, E) ->
 
   if
     is_atom(ERef) ->
-      {ERef, ST, expand_alias(Meta, true, ERef, EOpts, ET)};
+      {ERef, ST, alias(Meta, ERef, true, EOpts, ET)};
     true ->
       file_error(Meta, E, ?MODULE, {expected_compile_time_module, alias, Ref})
   end;
@@ -90,11 +90,18 @@ expand({require, Meta, [Ref, Opts]}, S, E) ->
   case lists:keyfind(defined, 1, Meta) of
     {defined, Mod} when is_atom(Mod) ->
       EA = ET#{context_modules := [Mod | ?key(ET, context_modules)]},
-      {ERef, ST, expand_alias(Meta, false, ERef, EOpts, EA)};
+
+      SU = case E of
+        #{function := nil} -> ST;
+        _ -> ST#elixir_ex{runtime_modules=[Mod | ST#elixir_ex.runtime_modules]}
+      end,
+
+      {ERef, SU, alias(Meta, ERef, false, EOpts, EA)};
 
     false when is_atom(ERef) ->
       elixir_aliases:ensure_loaded(Meta, ERef, ET),
-      {ERef, ST, expand_require(Meta, ERef, EOpts, ET)};
+      RE = elixir_aliases:require(Meta, ERef, EOpts, ET, true),
+      {ERef, ST, alias(Meta, ERef, false, EOpts, RE)};
 
     false ->
       file_error(Meta, E, ?MODULE, {expected_compile_time_module, require, Ref})
@@ -111,8 +118,11 @@ expand({import, Meta, [Ref, Opts]}, S, E) ->
   if
     is_atom(ERef) ->
       elixir_aliases:ensure_loaded(Meta, ERef, ET),
-      {Functions, Macros} = elixir_import:import(Meta, ERef, EOpts, ET),
-      {ERef, ST, expand_require(Meta, ERef, EOpts, ET#{functions := Functions, macros := Macros})};
+
+      case elixir_import:import(Meta, ERef, EOpts, ET, true, true) of
+        {ok, EI} -> {ERef, ST, EI};
+        {error, Reason} -> elixir_errors:file_error(Meta, E, elixir_import, Reason)
+      end;
     true ->
       file_error(Meta, E, ?MODULE, {expected_compile_time_module, import, Ref})
   end;
@@ -514,7 +524,7 @@ expand_fn_capture(Meta, Arg, S, E) ->
     {{remote, Remote, Fun, Arity}, RequireMeta, DotMeta, SE, EE} ->
       is_atom(Remote) andalso
         elixir_env:trace({remote_function, RequireMeta, Remote, Fun, Arity}, E),
-      AttachedMeta = attach_context_module(Remote, RequireMeta, E),
+      AttachedMeta = attach_runtime_module(Remote, RequireMeta, S, E),
       {{'&', Meta, [{'/', [], [{{'.', DotMeta, [Remote, Fun]}, AttachedMeta, []}, Arity]}]}, SE, EE};
     {{local, Fun, Arity}, _, _, _SE, #{function := nil}} ->
       file_error(Meta, E, ?MODULE, {undefined_local_capture, Fun, Arity});
@@ -836,7 +846,7 @@ expand_local(Meta, Name, Args, S, #{module := Module, function := Function, cont
   %% so we can print multiple entries at the same time.
   case Context of
     match ->
-      module_error(Meta, E, ?MODULE, {invalid_local_invocation, match, {Name, Meta, Args}});
+      module_error(Meta, E, ?MODULE, {invalid_local_invocation, "match", {Name, Meta, Args}});
 
     guard ->
       module_error(Meta, E, ?MODULE, {invalid_local_invocation, guard_context(S), {Name, Meta, Args}});
@@ -866,7 +876,7 @@ expand_remote(Receiver, DotMeta, Right, Meta, Args, S, SL, #{context := Context}
       {{{'.', DotMeta, [Receiver, Right]}, Meta, []}, SL, E};
 
     true ->
-      AttachedMeta = attach_context_module(Receiver, Meta, E),
+      AttachedMeta = attach_runtime_module(Receiver, Meta, S, E),
       {EArgs, {SA, _}, EA} = mapfold(fun expand_arg/3, {SL, S}, E, Args),
 
       case rewrite(Context, Receiver, DotMeta, Right, AttachedMeta, EArgs, S) of
@@ -882,17 +892,9 @@ expand_remote(Receiver, DotMeta, Right, Meta, Args, _, _, E) ->
   Call = {{'.', DotMeta, [Receiver, Right]}, Meta, Args},
   file_error(Meta, E, ?MODULE, {invalid_call, Call}).
 
-attach_context_module(_Receiver, Meta, #{function := nil}) ->
-  Meta;
-attach_context_module(Receiver, Meta, #{context_modules := [Ctx | _], module := Mod})
-    %% If the context is the current module or
-    %% if the receiver is the current module,
-    %% then there is no context module.
-    when Ctx == Mod; Receiver == Mod ->
-  Meta;
-attach_context_module(Receiver, Meta, #{context_modules := ContextModules}) ->
-  case lists:member(Receiver, ContextModules) of
-    true -> [{context_module, true} | Meta];
+attach_runtime_module(Receiver, Meta, S, _E) ->
+  case lists:member(Receiver, S#elixir_ex.runtime_modules) of
+    true -> [{runtime_module, true} | Meta];
     false -> Meta
   end.
 
@@ -982,54 +984,21 @@ no_alias_expansion({'__aliases__', _, [H | T]}) when is_atom(H) ->
 no_alias_expansion(Other) ->
   Other.
 
-expand_require(Meta, Ref, Opts, E) ->
-  elixir_env:trace({require, Meta, Ref, Opts}, E),
-  RE = E#{requires := ordsets:add_element(Ref, ?key(E, requires))},
-  expand_alias(Meta, false, Ref, Opts, RE).
-
-expand_alias(Meta, IncludeByDefault, Ref, Opts, E) ->
-  case expand_as(lists:keyfind(as, 1, Opts), Meta, IncludeByDefault, Ref, E) of
-    {ok, New} ->
-      {Aliases, MacroAliases} = elixir_aliases:store(Meta, New, Ref, Opts, E),
-      E#{aliases := Aliases, macro_aliases := MacroAliases};
-
-    error ->
-      E
-  end.
-
-expand_as({as, Atom}, Meta, _IncludeByDefault, _Ref, E) when is_atom(Atom), not is_boolean(Atom) ->
-  case atom_to_list(Atom) of
-    "Elixir." ++ ([FirstLetter | _] = Rest) when FirstLetter >= $A, FirstLetter =< $Z ->
-      case string:tokens(Rest, ".") of
-        [_] ->
-          {ok, Atom};
-        _ ->
-          file_error(Meta, E, ?MODULE, {invalid_alias_for_as, nested_alias, Atom})
-      end;
-    _ ->
-      file_error(Meta, E, ?MODULE, {invalid_alias_for_as, not_alias, Atom})
-  end;
-expand_as(false, Meta, IncludeByDefault, Ref, E) ->
-  if
-    IncludeByDefault ->
-      case elixir_aliases:last(Ref) of
-        {ok, NewRef} -> {ok, NewRef};
-        error -> file_error(Meta, E, ?MODULE, {invalid_alias_module, Ref})
-      end;
-    true -> error
-  end;
-expand_as({as, Other}, Meta, _IncludeByDefault, _Ref, E) ->
-  file_error(Meta, E, ?MODULE, {invalid_alias_for_as, not_alias, Other}).
-
 %% Aliases
+
+alias(Meta, Ref, IncludeByDefault, Opts, E) ->
+  case elixir_aliases:alias(Meta, Ref, IncludeByDefault, Opts, E, true) of
+    {ok, EA} -> EA;
+    {error, Reason} -> elixir_errors:file_error(Meta, E, elixir_aliases, Reason)
+  end.
 
 expand_without_aliases_report({'__aliases__', _, _} = Alias, S, E) ->
   expand_aliases(Alias, S, E, false);
 expand_without_aliases_report(Other, S, E) ->
   expand(Other, S, E).
 
-expand_aliases({'__aliases__', Meta, _} = Alias, S, E, Report) ->
-  case elixir_aliases:expand_or_concat(Alias, E) of
+expand_aliases({'__aliases__', Meta, List} = Alias, S, E, Report) ->
+  case elixir_aliases:expand_or_concat(Meta, List, E, true) of
     Receiver when is_atom(Receiver) ->
       if
         Receiver =:= 'Elixir.True'; Receiver =:= 'Elixir.False'; Receiver =:= 'Elixir.Nil' ->
@@ -1040,12 +1009,12 @@ expand_aliases({'__aliases__', Meta, _} = Alias, S, E, Report) ->
       Report andalso elixir_env:trace({alias_reference, Meta, Receiver}, E),
       {Receiver, S, E};
 
-    Aliases ->
-      {EAliases, SA, EA} = expand_args(Aliases, S, E),
+    [Head | Tail] ->
+      {EHead, SA, EA} = expand(Head, S, E),
 
-      case lists:all(fun is_atom/1, EAliases) of
+      case is_atom(EHead) of
         true ->
-          Receiver = elixir_aliases:concat(EAliases),
+          Receiver = elixir_aliases:concat([EHead | Tail]),
           Report andalso elixir_env:trace({alias_reference, Meta, Receiver}, E),
           {Receiver, SA, EA};
 
@@ -1166,7 +1135,7 @@ assert_no_underscore_clause_in_cond(_Other, _E) ->
 %% Errors
 
 guard_context(#elixir_ex{prematch={_, _, {bitsize, _}}}) -> "bitstring size specifier";
-guard_context(_) -> "guards".
+guard_context(_) -> "guard".
 
 format_error(invalid_match_on_zero_float) ->
   "pattern matching on 0.0 is equivalent to matching only on +0.0 from Erlang/OTP 27+. Instead you must match on +0.0 or -0.0";
@@ -1216,9 +1185,6 @@ format_error(unhandled_type_op) ->
   "It is also used in typespecs, such as @type and @spec, to describe inputs and outputs";
 format_error(as_in_multi_alias_call) ->
   ":as option is not supported by multi-alias call";
-format_error({invalid_alias_module, Ref}) ->
-  io_lib:format("alias cannot be inferred automatically for module: ~ts, please use the :as option. Implicit aliasing is only supported with Elixir modules",
-                ['Elixir.Macro':to_string(Ref)]);
 format_error({commonly_mistaken_alias, Ref}) ->
   Module = 'Elixir.Macro':to_string(Ref),
   io_lib:format("reserved alias \"~ts\" expands to the atom :\"Elixir.~ts\". Perhaps you meant to write \"~ts\" instead?", [Module, Module, string:casefold(Module)]);
@@ -1264,7 +1230,7 @@ format_error({invalid_expr_in_guard, Kind}) ->
   io_lib:format(Message, [Kind]);
 format_error({invalid_expr_in_bitsize, Kind}) ->
   Message =
-    "~ts is not allowed in bitstring size specifier. The size specifier in matches works like guards. "
+    "~ts is not allowed inside a bitstring size specifier. The size specifier in matches works like guards. "
     "To learn more about guards, visit: https://hexdocs.pm/elixir/patterns-and-guards.html#guards",
   io_lib:format(Message, [Kind]);
 format_error({invalid_alias, Expr}) ->
@@ -1292,14 +1258,6 @@ format_error({invalid_clauses, Name}) ->
     "the function \"~ts\" cannot handle clauses with the -> operator because it is not a macro. "
     "Please make sure you are invoking the proper name and that it is a macro",
   io_lib:format(Message, [Name]);
-format_error({invalid_alias_for_as, Reason, Value}) ->
-  ExpectedGot =
-    case Reason of
-      not_alias -> "expected an alias, got";
-      nested_alias -> "expected a simple alias, got nested alias"
-    end,
-  io_lib:format("invalid value for option :as, ~ts: ~ts",
-                [ExpectedGot, 'Elixir.Macro':to_string(Value)]);
 format_error({invalid_function_call, Expr}) ->
   io_lib:format("invalid function call :~ts.()", [Expr]);
 format_error({invalid_call, Call}) ->
@@ -1313,8 +1271,8 @@ format_error({invalid_quoted_expr, Expr}) ->
   io_lib:format(Message, ['Elixir.Kernel':inspect(Expr, [])]);
 format_error({invalid_local_invocation, Context, {Name, _, Args} = Call}) ->
   Message =
-    "cannot find or invoke local ~ts/~B inside ~ts. "
-    "Only macros can be invoked in a ~ts and they must be defined before their invocation. Called as: ~ts",
+    "cannot find or invoke local ~ts/~B inside a ~ts. "
+    "Only macros can be invoked inside a ~ts and they must be defined before their invocation. Called as: ~ts",
   io_lib:format(Message, [Name, length(Args), Context, Context, 'Elixir.Macro':to_string(Call)]);
 format_error({invalid_pid_in_function, Pid, {Name, Arity}}) ->
   io_lib:format("cannot compile PID ~ts inside quoted expression for function ~ts/~B",
@@ -1369,7 +1327,7 @@ format_error({undefined_var_to_call, Name}) ->
   io_lib:format("variable \"~ts\" does not exist and is being expanded to \"~ts()\","
                 " please use parentheses to remove the ambiguity or change the variable name", [Name, Name]);
 format_error({parens_map_lookup, Map, Field, Context}) ->
-  io_lib:format("cannot invoke remote function in ~ts. "
+  io_lib:format("cannot invoke remote function inside a ~ts. "
                 "If you want to do a map lookup instead, please remove parens from ~ts.~ts()",
                 [Context, 'Elixir.Macro':to_string(Map), Field]);
 format_error({super_in_genserver, {Name, Arity}}) ->

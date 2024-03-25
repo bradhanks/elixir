@@ -18,23 +18,36 @@ defmodule Kernel.ParallelCompiler do
   # TODO: Deprecate this on Elixir v1.20.
   @doc deprecated: "Use `pmap/2` instead"
   def async(fun) when is_function(fun, 0) do
+    {ref, task} = inner_async(fun)
+    send(task.pid, ref)
+    task
+  end
+
+  defp inner_async(fun) do
     case :erlang.get(:elixir_compiler_info) do
       {compiler_pid, file_pid} ->
+        ref = make_ref()
         file = :erlang.get(:elixir_compiler_file)
         dest = :erlang.get(:elixir_compiler_dest)
 
         {:error_handler, error_handler} = :erlang.process_info(self(), :error_handler)
         {_parent, checker} = Module.ParallelChecker.get()
 
-        Task.async(fn ->
-          send(compiler_pid, {:async, self()})
-          Module.ParallelChecker.put(compiler_pid, checker)
-          :erlang.put(:elixir_compiler_info, {compiler_pid, file_pid})
-          :erlang.put(:elixir_compiler_file, file)
-          dest != :undefined and :erlang.put(:elixir_compiler_dest, dest)
-          :erlang.process_flag(:error_handler, error_handler)
-          fun.()
-        end)
+        task =
+          Task.async(fn ->
+            Module.ParallelChecker.put(compiler_pid, checker)
+            :erlang.put(:elixir_compiler_info, {compiler_pid, file_pid})
+            :erlang.put(:elixir_compiler_file, file)
+            dest != :undefined and :erlang.put(:elixir_compiler_dest, dest)
+            :erlang.process_flag(:error_handler, error_handler)
+
+            receive do
+              ^ref -> fun.()
+            end
+          end)
+
+        send(compiler_pid, {:async, task.pid})
+        {ref, task}
 
       :undefined ->
         raise ArgumentError,
@@ -52,41 +65,29 @@ defmodule Kernel.ParallelCompiler do
   """
   @doc since: "1.16.0"
   def pmap(collection, fun) when is_function(fun, 1) do
-    parent = self()
     ref = make_ref()
 
     # We spawn a series of tasks for parallel processing.
-    # The tasks notify themselves to the compiler.
-    tasks =
+    # The tasks are waiting until we give the go ahead.
+    refs_tasks =
       Enum.map(collection, fn item ->
-        async(fn ->
-          send(parent, {ref, self()})
-
-          receive do
-            ^ref -> fun.(item)
-          end
-        end)
+        inner_async(fn -> fun.(item) end)
       end)
-
-    # Then the tasks notify us. This is important because if
-    # we wait before the tasks notify the compiler, we may be
-    # released as there is nothing else running.
-    on =
-      for %{pid: pid} <- tasks do
-        receive do
-          {^ref, ^pid} -> pid
-        end
-      end
 
     # Notify the compiler we are waiting on the tasks.
     {compiler_pid, file_pid} = :erlang.get(:elixir_compiler_info)
     defining = :elixir_module.compiler_modules()
+    on = Enum.map(refs_tasks, fn {_ref, %{pid: pid}} -> pid end)
     send(compiler_pid, {:waiting, :pmap, self(), ref, file_pid, on, defining, :raise})
 
     # Now we allow the tasks to run. This step is not strictly
     # necessary but it makes compilation more deterministic by
     # only allowing tasks to run once we are waiting.
-    Enum.each(on, &send(&1, ref))
+    tasks =
+      Enum.map(refs_tasks, fn {ref, task} ->
+        send(task.pid, ref)
+        task
+      end)
 
     # Await tasks and notify the compiler they are done. We could
     # have the tasks report directly to the compiler, which in turn
@@ -455,15 +456,22 @@ defmodule Kernel.ParallelCompiler do
   # No more queue, nothing waiting, this cycle is done
   defp spawn_workers([], spawned, waiting, files, result, warnings, errors, state)
        when map_size(spawned) == 0 and map_size(waiting) == 0 do
+    # Print any spurious error that we may have found
+    Enum.map(errors, fn {diagnostic, read_snippet} ->
+      :elixir_errors.print_diagnostic(diagnostic, read_snippet)
+    end)
+
     [] = files
     cycle_return = each_cycle_return(state.each_cycle.())
     state = cycle_timing(result, state)
 
     case cycle_return do
       {:runtime, dependent_modules, extra_warnings} ->
+        :elixir_code_server.cast(:purge_compiler_modules)
         verify_modules(result, extra_warnings ++ warnings, dependent_modules, state)
 
       {:compile, [], extra_warnings} ->
+        :elixir_code_server.cast(:purge_compiler_modules)
         verify_modules(result, extra_warnings ++ warnings, [], state)
 
       {:compile, more, extra_warnings} ->
@@ -509,8 +517,9 @@ defmodule Kernel.ParallelCompiler do
     if deadlocked do
       spawn_workers(deadlocked, spawned, waiting, files, result, warnings, errors, state)
     else
-      deadlock_errors = handle_deadlock(waiting, files)
-      {return_error(deadlock_errors ++ errors, warnings), state}
+      return_error(warnings, errors, state, fn ->
+        handle_deadlock(waiting, files)
+      end)
     end
   end
 
@@ -680,12 +689,13 @@ defmodule Kernel.ParallelCompiler do
         state = %{state | timer_ref: timer_ref}
         spawn_workers(queue, spawned, waiting, files, result, warnings, errors, state)
 
-      {:diagnostic, %{severity: :warning, file: file} = diagnostic} ->
+      {:diagnostic, %{severity: :warning, file: file} = diagnostic, read_snippet} ->
+        :elixir_errors.print_diagnostic(diagnostic, read_snippet)
         warnings = [%{diagnostic | file: file && Path.absname(file)} | warnings]
         wait_for_messages(queue, spawned, waiting, files, result, warnings, errors, state)
 
-      {:diagnostic, %{severity: :error, file: file} = diagnostic} ->
-        errors = [%{diagnostic | file: file && Path.absname(file)} | errors]
+      {:diagnostic, %{severity: :error} = diagnostic, read_snippet} ->
+        errors = [{diagnostic, read_snippet} | errors]
         wait_for_messages(queue, spawned, waiting, files, result, warnings, errors, state)
 
       {:file_ok, child_pid, ref, file, lexical} ->
@@ -705,10 +715,13 @@ defmodule Kernel.ParallelCompiler do
         spawn_workers(queue, new_spawned, waiting, new_files, result, warnings, errors, state)
 
       {:file_error, child_pid, file, {kind, reason, stack}} ->
-        print_error(file, kind, reason, stack)
         {_file, _new_spawned, new_files} = discard_file_pid(spawned, files, child_pid)
         terminate(new_files)
-        {return_error([to_error(file, kind, reason, stack) | errors], warnings), state}
+
+        return_error(warnings, errors, state, fn ->
+          print_error(file, kind, reason, stack)
+          [to_error(file, kind, reason, stack)]
+        end)
 
       {:DOWN, ref, :process, pid, reason} when is_map_key(spawned, ref) ->
         # async spawned processes have no file, so we always have to delete the ref directly
@@ -717,18 +730,30 @@ defmodule Kernel.ParallelCompiler do
         {file, spawned, files} = discard_file_pid(spawned, files, pid)
 
         if file do
-          print_error(file.file, :exit, reason, [])
           terminate(files)
-          {return_error([to_error(file.file, :exit, reason, []) | errors], warnings), state}
+
+          return_error(warnings, errors, state, fn ->
+            print_error(file.file, :exit, reason, [])
+            [to_error(file.file, :exit, reason, [])]
+          end)
         else
           wait_for_messages(queue, spawned, waiting, files, result, warnings, errors, state)
         end
     end
   end
 
-  defp return_error(errors, warnings) do
+  defp return_error(warnings, errors, state, fun) do
+    # Also prune compiler modules in case of errors
+    :elixir_code_server.cast(:purge_compiler_modules)
+
+    errors =
+      Enum.map(errors, fn {%{file: file} = diagnostic, read_snippet} ->
+        :elixir_errors.print_diagnostic(diagnostic, read_snippet)
+        %{diagnostic | file: file && Path.absname(file)}
+      end)
+
     info = %{compile_warnings: Enum.reverse(warnings), runtime_warnings: []}
-    {:error, Enum.reverse(errors), info}
+    {{:error, Enum.reverse(errors, fun.()), info}, state}
   end
 
   defp update_result(result, kind, module, value) do

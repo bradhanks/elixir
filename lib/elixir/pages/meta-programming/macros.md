@@ -26,7 +26,7 @@ defmodule Unless do
 end
 ```
 
-The function receives the arguments and passes them to `if/2`. However, as we learned in the [previous guide](quote-and-unquote.html), the macro will receive quoted expressions, inject them into the quote, and finally return another quoted expression.
+The function receives the arguments and passes them to `if/2`. However, as we learned in the [previous guide](quote-and-unquote.md), the macro will receive quoted expressions, inject them into the quote, and finally return another quoted expression.
 
 Let's start `iex` with the module above:
 
@@ -223,7 +223,7 @@ It is important that a macro is defined before its usage. Failing to define a ma
 
 ```elixir
 iex> defmodule Sample do
-...>  def four, do: two + two
+...>  def four, do: two() + two()
 ...>  defmacrop two, do: 2
 ...> end
 ** (CompileError) iex:2: function two/0 undefined

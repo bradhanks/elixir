@@ -169,8 +169,8 @@ iex> :observer.start()
 > When running `iex` inside a project with `iex -S mix`, `observer` won't be available as a dependency. To do so, you will need to call the following functions before:
 >
 > ```elixir
-> iex> Mix.ensure_application!(:wx)
-> iex> Mix.ensure_application!(:runtime_tools)
+> iex> Mix.ensure_application!(:wx)             # Not necessary on Erlang/OTP 27+
+> iex> Mix.ensure_application!(:runtime_tools)  # Not necessary on Erlang/OTP 27+
 > iex> Mix.ensure_application!(:observer)
 > iex> :observer.start()
 > ```
@@ -183,7 +183,7 @@ A GUI should pop up containing all sorts of information about our system, from g
 
 In the Applications tab, you will see all applications currently running in your system alongside their supervision tree. You can select the `kv` application to explore it further:
 
-<img src="images/kv-observer.png" alt="Observer GUI screenshot" />
+<img src="assets/kv-observer.png" alt="Observer GUI screenshot" />
 
 Not only that, as you create new buckets on the terminal, you should see new processes spawned in the supervision tree shown in Observer:
 

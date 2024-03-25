@@ -2,6 +2,7 @@
 canonical = System.fetch_env!("CANONICAL")
 
 [
+  assets: "lib/elixir/pages/images",
   extras: [
     "lib/elixir/pages/getting-started/introduction.md",
     "lib/elixir/pages/getting-started/basic-types.md",
@@ -77,6 +78,10 @@ canonical = System.fetch_env!("CANONICAL")
   ],
   skip_undefined_reference_warnings_on: [
     "lib/elixir/pages/references/compatibility-and-deprecations.md"
+  ],
+  skip_code_autolink_to: [
+    "Enumerable.List",
+    "Inspect.MapSet"
   ],
   formatters: ["html", "epub"],
   groups_for_modules: [

@@ -185,7 +185,7 @@ defmodule Kernel.ErrorsTest do
 
   test "literal on map and struct" do
     assert_compile_error(
-      ["nofile:1:11", "expected key-value pairs in a map, got: put_in(foo.bar.baz, nil)"],
+      ["nofile:1:10", "expected key-value pairs in a map, got: put_in(foo.bar.baz, nil)"],
       ~c"foo = 1; %{put_in(foo.bar.baz, nil), foo}"
     )
   end
@@ -640,8 +640,7 @@ defmodule Kernel.ErrorsTest do
     assert_compile_error(
       [
         "nofile:3:3",
-        "invalid :only option for import, expected value to be an atom " <>
-          ":functions, :macros, or a list literal, got: x"
+        "invalid :only option for import, expected value to be an atom :functions, :macros, or a literal keyword list of function names with arity as values, got: x"
       ],
       ~c"""
       defmodule Kernel.ErrorsTest.Only do
@@ -656,8 +655,8 @@ defmodule Kernel.ErrorsTest do
     assert_compile_error(
       [
         "nofile:3:3",
-        "invalid :except option for import, expected value to be a list " <>
-          "literal, got: Module.__get_attribute__(Kernel.ErrorsTest.Only, :x, 3, true)"
+        "invalid :except option for import, expected value to be a literal keyword list of function names " <>
+          "with arity as values, got: Module.__get_attribute__(Kernel.ErrorsTest.Only, :x, 3, true)"
       ],
       ~c"""
       defmodule Kernel.ErrorsTest.Only do
@@ -699,14 +698,6 @@ defmodule Kernel.ErrorsTest do
       end
       """
     )
-  end
-
-  test "no macros" do
-    assert_compile_error(["nofile:2:3", "could not load macros from module :lists"], ~c"""
-    defmodule Kernel.ErrorsTest.NoMacros do
-      import :lists, only: :macros
-    end
-    """)
   end
 
   test "invalid macro" do
@@ -992,11 +983,11 @@ defmodule Kernel.ErrorsTest do
   end
 
   test "duplicate map keys" do
-    assert_compile_error(["nofile:1:4", "key :a will be overridden in map"], """
+    assert_compile_error(["nofile:1:3", "key :a will be overridden in map"], """
       %{a: :b, a: :c} = %{a: :c}
     """)
 
-    assert_compile_error(["nofile:1:4", "key :a will be overridden in map"], """
+    assert_compile_error(["nofile:1:3", "key :a will be overridden in map"], """
       %{a: :b, a: :c, a: :d} = %{a: :c}
     """)
   end

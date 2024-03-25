@@ -158,6 +158,10 @@ defmodule Code do
       of keys to traverse in the application environment and `return` is either
       `{:ok, value}` or `:error`.
 
+    * `:defmodule` - (since v1.16.2) traced as soon as the definition of a module
+      starts. This is invoked early on in the module life-cycle, `Module.open?/1`
+      still returns `false` for such traces
+
     * `{:on_module, bytecode, _ignore}` - (since v1.13.0) traced whenever a module
       is defined. This is equivalent to the `@after_compile` callback and invoked
       after any `@after_compile` in the given module. The third element is currently
@@ -661,9 +665,9 @@ defmodule Code do
     * `:line` - the line the string starts, used for error reporting
 
     * `:line_length` - the line length to aim for when formatting
-      the document. Defaults to 98. Note this value is used as
-      guideline but there are situations where it is not enforced.
-      See the "Line length" section below for more information
+      the document. Defaults to 98. This value indicates when an expression
+      should be broken over multiple lines but it is not guaranteed
+      to do so. See the "Line length" section below for more information
 
     * `:locals_without_parens` - a keyword list of name and arity
       pairs that should be kept without parens whenever possible.
@@ -794,9 +798,10 @@ defmodule Code do
   ## Line length
 
   Another point about the formatter is that the `:line_length` configuration
-  is a guideline. In many cases, it is not possible for the formatter to break
-  your code apart, which means it will go over the line length. For example,
-  if you have a long string:
+  indicates when an expression should be broken over multiple lines but it is
+  not guaranteed to do so. In many cases, it is not possible for the formatter
+  to break your code apart, which means it will go over the line length.
+  For example, if you have a long string:
 
       "this is a very long string that will go over the line length"
 
@@ -809,15 +814,15 @@ defmodule Code do
   The string concatenation makes the code fit on a single line and also
   gives more options to the formatter.
 
-  This may also appear in do/end blocks, where the `do` keyword (or `->`)
-  may go over the line length because there is no opportunity for the
-  formatter to introduce a line break in a readable way. For example,
-  if you do:
+  This may also appear in keywords such as do/end blocks and operators,
+  where the `do` keyword may go over the line length because there is no
+  opportunity for the formatter to introduce a line break in a readable way.
+  For example, if you do:
 
       case very_long_expression() do
       end
 
-  And only the `do` keyword is above the line length, Elixir **will not**
+  And only the `do` keyword is beyond the line length, Elixir **will not**
   emit this:
 
       case very_long_expression()
@@ -1214,6 +1219,7 @@ defmodule Code do
   It returns the AST if it succeeds,
   raises an exception otherwise. The exception is a `TokenMissingError`
   in case a token is missing (usually because the expression is incomplete),
+  `MismatchedDelimiterError` (in case of mismatched opening and closing delimiters) and
   `SyntaxError` otherwise.
 
   Check `string_to_quoted/2` for options information.
@@ -1628,7 +1634,8 @@ defmodule Code do
       emit a warning and expand as to a local call to the zero-arity function
       of the same name (for example, `node` would be expanded as `node()`).
       This `:warn` behavior only exists for compatibility reasons when working
-      with old dependencies.
+      with old dependencies, its usage is discouraged and it will be removed
+      in future releases.
 
   It always returns `:ok`. Raises an error for invalid options.
 
@@ -1679,6 +1686,7 @@ defmodule Code do
   end
 
   # TODO: Make this option have no effect on Elixir v2.0
+  # TODO: Warn if mode is :warn on Elixir v1.19
   def put_compiler_option(:on_undefined_variable, value) when value in [:raise, :warn] do
     :elixir_config.put(:on_undefined_variable, value)
     :ok
@@ -2028,7 +2036,11 @@ defmodule Code do
   @spec fetch_docs(module | String.t()) ::
           {:docs_v1, annotation, beam_language, format, module_doc :: doc_content, metadata,
            docs :: [doc_element]}
-          | {:error, :module_not_found | :chunk_not_found | {:invalid_chunk, binary}}
+          | {:error,
+             :module_not_found
+             | :chunk_not_found
+             | {:invalid_chunk, binary}
+             | :invalid_beam}
         when annotation: :erl_anno.anno(),
              beam_language: :elixir | :erlang | atom(),
              doc_content: %{optional(binary) => binary} | :none | :hidden,
@@ -2099,6 +2111,9 @@ defmodule Code do
 
       {:error, :beam_lib, {:file_error, _, :enoent}} ->
         {:error, :module_not_found}
+
+      {:error, :beam_lib, _} ->
+        {:error, :invalid_beam}
     end
   end
 

@@ -393,6 +393,9 @@ defmodule String do
   When the pattern used is a regular expression, the string is
   split using `Regex.split/3`.
 
+  If the pattern cannot be found, a list containing the original  
+  string will be returned.
+
   ## Options
 
     * `:parts` (positive integer or `:infinity`) - the string
@@ -457,6 +460,11 @@ defmodule String do
 
       iex> String.split("abc", "", parts: 3)
       ["", "a", "bc"]
+
+  Splitting on an non-existing pattern returns the original string:
+
+      iex> String.split("abc", ",")
+      ["abc"]
 
   Be aware that this function can split within or across grapheme boundaries.
   For example, take the grapheme "é" which is made of the characters
@@ -966,6 +974,7 @@ defmodule String do
 
   def capitalize(string, mode) when is_binary(string) do
     case :unicode_util.gc(string) do
+      [gc] -> grapheme_to_binary(:string.titlecase([gc]))
       [gc, rest] -> grapheme_to_binary(:string.titlecase([gc])) <> downcase(rest, mode)
       [gc | rest] -> grapheme_to_binary(:string.titlecase([gc])) <> downcase(rest, mode)
       [] -> ""
@@ -1843,7 +1852,7 @@ defmodule String do
       ** (FunctionClauseError) no function clause matching in String.valid?/2
 
   """
-  @spec valid?(t) :: boolean
+  @spec valid?(t, :default | :fast_ascii) :: boolean
   def valid?(string, algorithm \\ :default)
 
   def valid?(<<string::binary>>, :default), do: valid_utf8?(string)
@@ -1901,20 +1910,21 @@ defmodule String do
       "nem rán bERROR! bề"
   """
   @doc since: "1.16.0"
+  @spec replace_invalid(binary, t) :: t
   def replace_invalid(bytes, replacement \\ "�")
       when is_binary(bytes) and is_binary(replacement) do
     do_replace_invalid(bytes, replacement, <<>>)
   end
 
   # Valid ASCII (for better average speed)
-  defp do_replace_invalid(<<ascii::8, next::8, _::bytes>> = rest, rep, acc)
+  defp do_replace_invalid(<<ascii::8, next::8, _::binary>> = rest, rep, acc)
        when ascii in 0..127 and replace_invalid_is_next(next) do
-    <<_::8, rest::bytes>> = rest
+    <<_::8, rest::binary>> = rest
     do_replace_invalid(rest, rep, acc <> <<ascii::8>>)
   end
 
   # Valid UTF-8
-  defp do_replace_invalid(<<grapheme::utf8, rest::bytes>>, rep, acc) do
+  defp do_replace_invalid(<<grapheme::utf8, rest::binary>>, rep, acc) do
     do_replace_invalid(rest, rep, acc <> <<grapheme::utf8>>)
   end
 
@@ -1924,9 +1934,13 @@ defmodule String do
     acc <> rep
   end
 
-  defp do_replace_invalid(<<0b1110::4, i::4, 0b10::2, ii::6, next::8, _::bytes>> = rest, rep, acc)
+  defp do_replace_invalid(
+         <<0b1110::4, i::4, 0b10::2, ii::6, next::8, _::binary>> = rest,
+         rep,
+         acc
+       )
        when replace_invalid_ii_of_iii(i, ii) and replace_invalid_is_next(next) do
-    <<_::16, rest::bytes>> = rest
+    <<_::16, rest::binary>> = rest
     do_replace_invalid(rest, rep, acc <> rep)
   end
 
@@ -1937,12 +1951,12 @@ defmodule String do
   end
 
   defp do_replace_invalid(
-         <<0b11110::5, i::3, 0b10::2, ii::6, next::8, _::bytes>> = rest,
+         <<0b11110::5, i::3, 0b10::2, ii::6, next::8, _::binary>> = rest,
          rep,
          acc
        )
        when replace_invalid_ii_of_iv(i, ii) and replace_invalid_is_next(next) do
-    <<_::16, rest::bytes>> = rest
+    <<_::16, rest::binary>> = rest
     do_replace_invalid(rest, rep, acc <> rep)
   end
 
@@ -1953,17 +1967,17 @@ defmodule String do
   end
 
   defp do_replace_invalid(
-         <<0b11110::5, i::3, 0b10::2, ii::6, 0b10::2, iii::6, next::8, _::bytes>> = rest,
+         <<0b11110::5, i::3, 0b10::2, ii::6, 0b10::2, iii::6, next::8, _::binary>> = rest,
          rep,
          acc
        )
        when replace_invalid_iii_of_iv(i, ii, iii) and replace_invalid_is_next(next) do
-    <<_::24, rest::bytes>> = rest
+    <<_::24, rest::binary>> = rest
     do_replace_invalid(rest, rep, acc <> rep)
   end
 
   # Everything else
-  defp do_replace_invalid(<<_, rest::bytes>>, rep, acc),
+  defp do_replace_invalid(<<_, rest::binary>>, rep, acc),
     do: do_replace_invalid(rest, rep, acc <> rep)
 
   # Final
@@ -2089,12 +2103,27 @@ defmodule String do
     end
   end
 
-  @doc false
-  @deprecated "Use String.next_grapheme/1 instead"
+  @doc """
+  Returns the size (in bytes) of the next grapheme.
+
+  The result is a tuple with the next grapheme size in bytes and
+  the remainder of the string or `nil` in case the string
+  reached its end.
+
+  ## Examples
+
+      iex> String.next_grapheme_size("olá")
+      {1, "lá"}
+
+      iex> String.next_grapheme_size("")
+      nil
+
+  """
   @spec next_grapheme_size(t) :: {pos_integer, t} | nil
   def next_grapheme_size(string) when is_binary(string) do
     case :unicode_util.gc(string) do
       [gc] -> {grapheme_byte_size(gc), <<>>}
+      [gc, rest] -> {grapheme_byte_size(gc), rest}
       [gc | rest] -> {grapheme_byte_size(gc), rest}
       [] -> nil
       {:error, <<_, rest::bits>>} -> {1, rest}
@@ -2237,12 +2266,14 @@ defmodule String do
   @doc """
   Returns a substring starting at the offset `start`, and of the given `length`.
 
-  If the offset is greater than string length, then it returns `""`.
+  This function works on Unicode graphemes. For example, slicing the first
+  three characters of the string "héllo" will return "hél", which internally
+  is represented by more than three bytes. Use `String.byte_slice/3` if you
+  want to slice by a given number of bytes, while respecting the codepoint
+  boundaries. If you want to work on raw bytes, check `Kernel.binary_part/3`
+  or `Kernel.binary_slice/3` instead.
 
-  Remember this function works with Unicode graphemes and considers
-  the slices to represent grapheme offsets. If you want to split
-  on raw bytes, check `Kernel.binary_part/3` or `Kernel.binary_slice/3`
-  instead.
+  If the offset is greater than string length, then it returns `""`.
 
   ## Examples
 
@@ -2302,17 +2333,19 @@ defmodule String do
   Returns a substring from the offset given by the start of the
   range to the offset given by the end of the range.
 
+  This function works on Unicode graphemes. For example, slicing the first
+  three characters of the string "héllo" will return "hél", which internally
+  is represented by more than three bytes. Use `String.byte_slice/3` if you
+  want to slice by a given number of bytes, while respecting the codepoint
+  boundaries. If you want to work on raw bytes, check `Kernel.binary_part/3`
+  or `Kernel.binary_slice/3` instead.
+
   If the start of the range is not a valid offset for the given
   string or if the range is in reverse order, returns `""`.
 
   If the start or end of the range is negative, the whole string
   is traversed first in order to convert the negative indices into
   positive ones.
-
-  Remember this function works with Unicode graphemes and considers
-  the slices to represent grapheme offsets. If you want to split
-  on raw bytes, check `Kernel.binary_part/3` or
-  `Kernel.binary_slice/2` instead
 
   ## Examples
 
@@ -2480,6 +2513,116 @@ defmodule String do
   defp split_bytes(rest, acc, 0), do: {acc, Enum.sum(rest)}
   defp split_bytes([], acc, _), do: {acc, 0}
   defp split_bytes([head | tail], acc, count), do: split_bytes(tail, head + acc, count - 1)
+
+  @doc """
+  Returns a substring starting at (or after) `start_bytes` and of at most
+  the given `size_bytes`.
+
+  This function works on bytes and then adjusts the string to eliminate
+  truncated codepoints. This is useful when you have a string and you need
+  to guarantee it does not exceed a certain amount of bytes.
+
+  If the offset is greater than the number of bytes in the string, then it
+  returns `""`. Similar to `String.slice/2`, a negative `start_bytes`
+  will be adjusted to the end of the string (but in bytes).
+
+  This function does not guarantee the string won't have invalid codepoints,
+  it only guarantees to remove truncated codepoints immediately at the beginning
+  or the end of the slice.
+
+  ## Examples
+
+  Consider the string "héllo". Let's see its representation:
+
+      iex> inspect("héllo", binaries: :as_binaries)
+      "<<104, 195, 169, 108, 108, 111>>"
+
+  Although the string has 5 characters, it is made of 6 bytes. Now imagine
+  we want to get only the first two bytes. To do so, let's use `binary_slice/3`,
+  which is unaware of codepoints:
+
+      iex> binary_slice("héllo", 0, 2)
+      <<104, 195>>
+
+  As you can see, this operation is unsafe and returns an invalid string.
+  That's because we cut the string in the middle of the bytes representing
+  "é". On the other hand, we could use `String.slice/3`:
+
+      iex> String.slice("héllo", 0, 2)
+      "hé"
+
+  While the above is correct, it has 3 bytes. If you have a requirement where
+  you need *at most* 2 bytes, the result would also be invalid. In such scenarios,
+  you can use this function, which will slice the given bytes, but clean up
+  the truncated codepoints:
+
+      iex> String.byte_slice("héllo", 0, 2)
+      "h"
+
+  Truncated codepoints at the beginning are also cleaned up:
+
+      iex> String.byte_slice("héllo", 2, 3)
+      "llo"
+
+  Note that, if you want to work on raw bytes, then you must use `binary_slice/3`
+  instead.
+  """
+  @doc since: "1.17.0"
+  @spec byte_slice(t, integer, non_neg_integer) :: t
+  def byte_slice(string, start_bytes, size_bytes)
+      when is_binary(string) and is_integer(start_bytes) and is_integer(size_bytes) and
+             size_bytes >= 0 do
+    total = byte_size(string)
+    start_bytes = if start_bytes < 0, do: max(total + start_bytes, 0), else: start_bytes
+
+    if start_bytes < total do
+      :erlang.binary_part(string, start_bytes, total - start_bytes)
+      |> invalid_prefix()
+      |> invalid_suffix(size_bytes)
+    else
+      ""
+    end
+  end
+
+  defp invalid_prefix(<<0b10::2, _::6, rest::binary>>), do: invalid_prefix(rest)
+  defp invalid_prefix(rest), do: rest
+
+  defp invalid_suffix(string, size) do
+    last = invalid_suffix(string, min(size, byte_size(string)) - 1, 0)
+    :erlang.binary_part(string, 0, last)
+  end
+
+  defp invalid_suffix(string, last, truncated) when last >= 0 do
+    byte = :binary.at(string, last)
+
+    cond do
+      # ASCII byte, discard all truncated entries
+      byte <= 127 ->
+        last + 1
+
+      # In the middle of a codepoint
+      byte <= 191 ->
+        invalid_suffix(string, last - 1, truncated + 1)
+
+      # 2 bytes codepoint start
+      byte <= 223 ->
+        if truncated == 1, do: last + truncated + 1, else: last
+
+      # 3 bytes codepoint start
+      byte <= 239 ->
+        if truncated == 2, do: last + truncated + 1, else: last
+
+      # 4 bytes codepoint start
+      byte <= 247 ->
+        if truncated == 3, do: last + truncated + 1, else: last
+
+      # Invalid codepoint, discard it, stop checking
+      true ->
+        last + 1
+    end
+  end
+
+  defp invalid_suffix(_string, _last, _truncated), do: 0
 
   @doc """
   Returns `true` if `string` starts with any of the prefixes given.
@@ -2932,74 +3075,13 @@ defmodule String do
   @spec jaro_distance(t, t) :: float
   def jaro_distance(string1, string2)
 
-  def jaro_distance(string, string), do: 1.0
+  def jaro_distance(string, string) when is_binary(string), do: 1.0
   def jaro_distance(_string, ""), do: 0.0
   def jaro_distance("", _string), do: 0.0
 
   def jaro_distance(string1, string2) when is_binary(string1) and is_binary(string2) do
-    {chars1, len1} = graphemes_and_length(string1)
-    {chars2, len2} = graphemes_and_length(string2)
-
-    case match(chars1, len1, chars2, len2) do
-      {0, _trans} ->
-        0.0
-
-      {comm, trans} ->
-        (comm / len1 + comm / len2 + (comm - trans) / comm) / 3
-    end
-  end
-
-  defp match(chars1, len1, chars2, len2) do
-    if len1 < len2 do
-      match(chars1, chars2, div(len2, 2) - 1)
-    else
-      match(chars2, chars1, div(len1, 2) - 1)
-    end
-  end
-
-  defp match(chars1, chars2, lim) do
-    match(chars1, chars2, {0, lim}, {0, 0, -1}, 0)
-  end
-
-  defp match([char | rest], chars, range, state, idx) do
-    {chars, state} = submatch(char, chars, range, state, idx)
-
-    case range do
-      {lim, lim} -> match(rest, tl(chars), range, state, idx + 1)
-      {pre, lim} -> match(rest, chars, {pre + 1, lim}, state, idx + 1)
-    end
-  end
-
-  defp match([], _, _, {comm, trans, _}, _), do: {comm, trans}
-
-  defp submatch(char, chars, {pre, _} = range, state, idx) do
-    case detect(char, chars, range) do
-      nil ->
-        {chars, state}
-
-      {subidx, chars} ->
-        {chars, proceed(state, idx - pre + subidx)}
-    end
-  end
-
-  defp detect(char, chars, {pre, lim}) do
-    detect(char, chars, pre + 1 + lim, 0, [])
-  end
-
-  defp detect(_char, _chars, 0, _idx, _acc), do: nil
-  defp detect(_char, [], _lim, _idx, _acc), do: nil
-
-  defp detect(char, [char | rest], _lim, idx, acc), do: {idx, Enum.reverse(acc, [nil | rest])}
-
-  defp detect(char, [other | rest], lim, idx, acc),
-    do: detect(char, rest, lim - 1, idx + 1, [other | acc])
-
-  defp proceed({comm, trans, former}, current) do
-    if current < former do
-      {comm + 1, trans + 1, current}
-    else
-      {comm + 1, trans, current}
-    end
+    # TODO: Replace by :string.jaro_similarity/2 when we require Erlang/OTP 27+
+    :elixir_utils.jaro_similarity(string1, string2)
   end
 
   @doc """
@@ -3034,7 +3116,6 @@ defmodule String do
             codepoint_byte_size: 1,
             grapheme_byte_size: 1,
             grapheme_to_binary: 1,
-            graphemes_and_length: 1,
             reverse_characters_to_binary: 1}
 
   defp byte_size_unicode(binary) when is_binary(binary), do: byte_size(binary)
@@ -3070,22 +3151,6 @@ defmodule String do
 
   defp grapheme_byte_size([], acc),
     do: acc
-
-  defp graphemes_and_length(string),
-    do: graphemes_and_length(string, [], 0)
-
-  defp graphemes_and_length(string, acc, length) do
-    case :unicode_util.gc(string) do
-      [gc | rest] ->
-        graphemes_and_length(rest, [gc | acc], length + 1)
-
-      [] ->
-        {:lists.reverse(acc), length}
-
-      {:error, <<byte, rest::bits>>} ->
-        graphemes_and_length(rest, [<<byte>> | acc], length + 1)
-    end
-  end
 
   defp reverse_characters_to_binary(acc),
     do: acc |> :lists.reverse() |> :unicode.characters_to_binary()

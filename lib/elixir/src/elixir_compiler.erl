@@ -16,7 +16,7 @@ quoted(Forms, File, Callback) ->
 
     elixir_lexical:run(
       Env,
-      fun (LexicalEnv) -> maybe_fast_compile(Forms, [], LexicalEnv) end,
+      fun (LexicalEnv) -> maybe_fast_compile(Forms, LexicalEnv) end,
       fun (#{lexical_tracker := Pid}) -> Callback(File, Pid) end
     ),
 
@@ -32,11 +32,11 @@ file(File, Callback) ->
 %% Evaluates the given code through the Erlang compiler.
 %% It may end-up evaluating the code if it is deemed a
 %% more efficient strategy depending on the code snippet.
-maybe_fast_compile(Forms, Args, E) ->
+maybe_fast_compile(Forms, E) ->
   case (?key(E, module) == nil) andalso allows_fast_compilation(Forms) andalso
         (not elixir_config:is_bootstrap()) of
     true  -> fast_compile(Forms, E);
-    false -> compile(Forms, Args, [], E)
+    false -> compile(Forms, [], [], E)
   end,
   ok.
 
@@ -45,11 +45,11 @@ compile(Quoted, ArgsList, CompilerOpts, #{line := Line} = E) ->
   {Expanded, SE, EE} = elixir_expand:expand(Block, elixir_env:env_to_ex(E), E),
   elixir_env:check_unused_vars(SE, EE),
 
-  {Module, Fun, Purgeable} =
+  {Module, Fun} =
     elixir_erl_compiler:spawn(fun() -> spawned_compile(Expanded, CompilerOpts, E) end),
 
   Args = list_to_tuple(ArgsList),
-  {dispatch(Module, Fun, Args, Purgeable), SE, EE}.
+  {dispatch(Module, Fun, Args), SE, EE}.
 
 spawned_compile(ExExprs, CompilerOpts, #{line := Line, file := File} = E) ->
   {Vars, S} = elixir_erl_var:from_env(E),
@@ -61,13 +61,12 @@ spawned_compile(ExExprs, CompilerOpts, #{line := Line, file := File} = E) ->
 
   {Module, Binary} = elixir_erl_compiler:noenv_forms(Forms, File, [nowarn_nomatch | CompilerOpts]),
   code:load_binary(Module, "", Binary),
-  {Module, Fun, is_purgeable(Module, Binary)}.
+  {Module, Fun}.
 
-dispatch(Module, Fun, Args, Purgeable) ->
+dispatch(Module, Fun, Args) ->
   Res = Module:Fun(Args),
   code:delete(Module),
-  Purgeable andalso code:purge(Module),
-  return_compiler_module(Module, Purgeable),
+  return_compiler_module(Module),
   Res.
 
 code_fun(nil) -> '__FILE__';
@@ -92,11 +91,8 @@ code_mod(Fun, Expr, Line, File, Module, Vars) when is_binary(File), is_integer(L
 retrieve_compiler_module() ->
   elixir_code_server:call(retrieve_compiler_module).
 
-return_compiler_module(Module, Purgeable) ->
-  elixir_code_server:cast({return_compiler_module, Module, Purgeable}).
-
-is_purgeable(Module, Binary) ->
-  beam_lib:chunks(Binary, [labeled_locals]) == {ok, {Module, [{labeled_locals, []}]}}.
+return_compiler_module(Module) ->
+  elixir_code_server:cast({return_compiler_module, Module}).
 
 allows_fast_compilation({'__block__', _, Exprs}) ->
   lists:all(fun allows_fast_compilation/1, Exprs);
@@ -111,8 +107,8 @@ fast_compile({defmodule, Meta, [Mod, [{do, Block}]]}, NoLineE) ->
   E = NoLineE#{line := ?line(Meta)},
 
   Expanded = case Mod of
-    {'__aliases__', _, _} ->
-      case elixir_aliases:expand_or_concat(Mod, E) of
+    {'__aliases__', AliasMeta, List} ->
+      case elixir_aliases:expand_or_concat(AliasMeta, List, E, true) of
         Receiver when is_atom(Receiver) -> Receiver;
         _ -> 'Elixir.Macro':expand(Mod, E)
       end;

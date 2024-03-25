@@ -111,11 +111,9 @@ defmodule Module.Types.Of do
 
     with {:ok, actual_type, context} <- of_fun.(left, {expected_type, expr}, stack, context) do
       # If we are in a pattern and we have a variable, the refinement
-      # will already have checked the type, so we skip the check here.
-      # TODO: properly handle dynamic. Do we need materialization?
-      if actual_type == dynamic() or
-           (kind == :pattern and is_var(left)) or
-           empty?(difference(actual_type, expected_type)) do
+      # will already have checked the type, so we skip the check here
+      # as an optimization.
+      if (kind == :pattern and is_var(left)) or compatible?(actual_type, expected_type) do
         {:ok, context}
       else
         hints = if meta[:inferred_bitstring_spec], do: [:inferred_bitstring_spec], else: []
@@ -146,7 +144,7 @@ defmodule Module.Types.Of do
   Handles remote calls.
   """
   def remote(module, fun, arity, meta, stack, context) when is_atom(module) do
-    if Keyword.get(meta, :context_module, false) do
+    if Keyword.get(meta, :runtime_module, false) do
       context
     else
       ParallelChecker.preload_module(stack.cache, module)

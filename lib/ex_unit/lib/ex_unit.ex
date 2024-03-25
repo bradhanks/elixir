@@ -70,7 +70,11 @@ defmodule ExUnit do
 
   """
   @type state ::
-          nil | {:excluded, binary} | {:failed, failed} | {:invalid, module} | {:skipped, binary}
+          nil
+          | {:excluded, binary}
+          | {:failed, failed}
+          | {:invalid, ExUnit.TestModule.t()}
+          | {:skipped, binary}
 
   @typedoc "The error state returned by `ExUnit.Test` and `ExUnit.TestModule`"
   @type failed :: [{Exception.kind(), reason :: term, Exception.stacktrace()}]
@@ -212,8 +216,9 @@ defmodule ExUnit do
       System.at_exit(fn
         0 ->
           time = ExUnit.Server.modules_loaded(false)
+          seed = Application.get_env(:ex_unit, :seed)
           options = persist_defaults(configuration())
-          %{failures: failures} = ExUnit.Runner.run(options, time)
+          %{failures: failures} = maybe_repeated_run(options, seed, time)
 
           if failures > 0 do
             System.at_exit(fn _ -> exit({:shutdown, Keyword.fetch!(options, :exit_status)}) end)
@@ -316,6 +321,10 @@ defmodule ExUnit do
       ExUnit with slow test reporting automatically runs in `trace` mode. It
       is disabled by default;
 
+    * `:slowest_modules` - prints timing information for the N slowest test modules. Running
+      ExUnit with slow test reporting automatically runs in `trace` mode. It
+      is disabled by default;
+
     * `:stacktrace_depth` - configures the stacktrace depth to be used
       on formatting and reporters, defaults to `20`;
 
@@ -403,8 +412,9 @@ defmodule ExUnit do
     end
 
     _ = ExUnit.Server.modules_loaded(additional_modules != [])
+    seed = Application.get_env(:ex_unit, :seed)
     options = persist_defaults(configuration())
-    ExUnit.Runner.run(options, nil)
+    maybe_repeated_run(options, seed, nil)
   end
 
   @doc """
@@ -416,10 +426,11 @@ defmodule ExUnit do
   @doc since: "1.12.0"
   @spec async_run() :: Task.t()
   def async_run() do
+    seed = Application.get_env(:ex_unit, :seed)
     options = persist_defaults(configuration())
 
     Task.async(fn ->
-      ExUnit.Runner.run(options, nil)
+      maybe_repeated_run(options, seed, nil)
     end)
   end
 
@@ -463,8 +474,7 @@ defmodule ExUnit do
   def fetch_test_supervisor() do
     case ExUnit.OnExitHandler.get_supervisor(self()) do
       {:ok, nil} ->
-        opts = [strategy: :one_for_one, max_restarts: 1_000_000, max_seconds: 1]
-        {:ok, sup} = Supervisor.start_link([], opts)
+        {:ok, sup} = ExUnit.OnExitHandler.Supervisor.start_link([])
         ExUnit.OnExitHandler.put_supervisor(self(), sup)
         {:ok, sup}
 
@@ -481,6 +491,31 @@ defmodule ExUnit do
   defp persist_defaults(config) do
     config |> Keyword.take([:max_cases, :seed, :trace]) |> configure()
     config
+  end
+
+  defp maybe_repeated_run(options, seed, load_us) do
+    repeat = Keyword.fetch!(options, :repeat_until_failure)
+    maybe_repeated_run(options, seed, load_us, repeat)
+  end
+
+  defp maybe_repeated_run(options, seed, load_us, repeat) do
+    case ExUnit.Runner.run(options, load_us) do
+      {%{failures: 0}, {sync_modules, async_modules}}
+      when repeat > 0 and (sync_modules != [] or async_modules != []) ->
+        ExUnit.Server.restore_modules(async_modules, sync_modules)
+
+        # Clear the seed if it was generated
+        if seed == nil do
+          Application.delete_env(:ex_unit, :seed)
+        end
+
+        # Re-run configuration
+        options = persist_defaults(configuration())
+        maybe_repeated_run(options, seed, load_us, repeat - 1)
+
+      {stats, _} ->
+        stats
+    end
   end
 
   defp put_seed(opts) do
@@ -501,7 +536,7 @@ defmodule ExUnit do
   end
 
   defp put_slowest(opts) do
-    if opts[:slowest] > 0 do
+    if opts[:slowest] > 0 or opts[:slowest_modules] > 0 do
       Keyword.put(opts, :trace, true)
     else
       opts

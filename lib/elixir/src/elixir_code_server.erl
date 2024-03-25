@@ -91,19 +91,34 @@ handle_cast({unrequire_files, Files}, Config) ->
   Unrequired = maps:without(Files, Current),
   {noreply, Config#elixir_code_server{required=Unrequired}};
 
-handle_cast({return_compiler_module, Module, Purgeable}, Config) ->
+handle_cast({return_compiler_module, Module}, Config) ->
+  {Used, Unused, Counter} = Config#elixir_code_server.mod_pool,
+  ModPool = {[Module | Used], Unused, Counter},
+  {noreply, Config#elixir_code_server{mod_pool=ModPool}};
+
+handle_cast(purge_compiler_modules, Config) ->
   {Used, Unused, Counter} = Config#elixir_code_server.mod_pool,
 
-  ModPool =
-    case Purgeable of
-      true -> {Used, [Module | Unused], Counter};
-      false -> {[Module | Used], Unused, Counter}
-    end,
+  case Used of
+    [] -> ok;
+    _ ->
+      Opts = [{monitor, [{tag, {purged, Used}}]}],
+      erlang:spawn_opt(fun() ->
+        [code:purge(Module) || Module <- Used],
+        ok
+      end, Opts)
+  end,
 
+  ModPool = {[], Unused, Counter},
   {noreply, Config#elixir_code_server{mod_pool=ModPool}};
 
 handle_cast(Request, Config) ->
   {stop, {badcast, Request}, Config}.
+
+handle_info({{purged, Purged}, _Ref, process, _Pid, _Reason}, Config) ->
+  {Used, Unused, Counter} = Config#elixir_code_server.mod_pool,
+  ModPool = {Used, Purged ++ Unused, Counter},
+  {noreply, Config#elixir_code_server{mod_pool=ModPool}};
 
 handle_info({'DOWN', Ref, process, _Pid, _Reason}, Config) ->
   {noreply, undefmodule(Ref, Config)};

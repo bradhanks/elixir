@@ -405,8 +405,8 @@ defmodule Kernel do
   """
   @doc guard: true
   @spec binary_part(binary, non_neg_integer, integer) :: binary
-  def binary_part(binary, start, length) do
-    :erlang.binary_part(binary, start, length)
+  def binary_part(binary, start, size) do
+    :erlang.binary_part(binary, start, size)
   end
 
   @doc """
@@ -2082,8 +2082,9 @@ defmodule Kernel do
   defp invalid_concat_left_argument_error(arg) do
     :erlang.error(
       ArgumentError.exception(
-        "the left argument of <> operator inside a match should always be a literal " <>
-          "binary because its size can't be verified. Got: #{arg}"
+        "cannot perform prefix match because the left operand of <> has unknown size. " <>
+          "The left operand of <> inside a match should either be a literal binary or " <>
+          "an existing variable with the pin operator (such as ^some_var). Got: #{arg}"
       )
     )
   end
@@ -2679,15 +2680,11 @@ defmodule Kernel do
   end
 
   @doc """
-  Gets a value from a nested structure.
+  Gets a value from a nested structure with nil-safe handling.
 
   Uses the `Access` module to traverse the structures
   according to the given `keys`, unless the `key` is a
   function, which is detailed in a later section.
-
-  Note that if none of the given keys are functions,
-  there is rarely a reason to use `get_in` over
-  writing "regular" Elixir code using `[]`.
 
   ## Examples
 
@@ -2715,18 +2712,6 @@ defmodule Kernel do
       iex> # Equivalent to:
       iex> users["unknown"][:age]
       nil
-
-      iex> users = nil
-      iex> get_in(users, [Access.all(), :age])
-      nil
-
-  Alternatively, if you need to access complex data-structures, you can
-  use pattern matching:
-
-      case users do
-        %{"john" => %{age: age}} -> age
-        _ -> default_value
-      end
 
   ## Functions as keys
 
@@ -2757,13 +2742,19 @@ defmodule Kernel do
 
       get_in(some_struct, [:some_key, :nested_key])
 
-  The good news is that structs have predefined shape. Therefore,
-  you can write instead:
+  There are two alternatives. Given structs have predefined keys,
+  we can use the `struct.field` notation:
 
       some_struct.some_key.nested_key
 
-  If, by any chance, `some_key` can return nil, you can always
-  fallback to pattern matching to provide nested struct handling:
+  However, the code above will fail if any of the values return `nil`.
+  If you also want to handle nil values, you can use `get_in/1`:
+
+      get_in(some_struct.some_key.nested_key)
+
+  Pattern-matching is another option for handling such cases,
+  which can be especially useful if you want to match on several
+  fields at once or provide custom return values:
 
       case some_struct do
         %{some_key: %{nested_key: value}} -> value
@@ -2982,6 +2973,63 @@ defmodule Kernel do
     do: Access.get_and_update(data, key, &pop_in_data(&1, tail))
 
   @doc """
+  Gets a key from the nested structure via the given `path`, with
+  nil-safe handling.
+
+  This is similar to `get_in/2`, except the path is extracted via
+  a macro rather than passing a list. For example:
+
+      get_in(opts[:foo][:bar])
+
+  Is equivalent to:
+
+      get_in(opts, [:foo, :bar])
+
+  Additionally, this macro can traverse structs:
+
+      get_in(struct.foo.bar)
+
+  In case any of the keys returns `nil`, then `nil` will be returned
+  and `get_in/1` won't traverse any further.
+
+  Note that in order for this macro to work, the complete path must always
+  be visible by this macro. For more information about the supported path
+  expressions, please check `get_and_update_in/2` docs.
+
+  ## Examples
+
+      iex> users = %{"john" => %{age: 27}, "meg" => %{age: 23}}
+      iex> get_in(users["john"].age)
+      27
+      iex> get_in(users["unknown"].age)
+      nil
+
+  """
+  defmacro get_in(path) do
+    {[h | t], _} = unnest(path, [], true, "get_in/1")
+    nest_get_in(h, quote(do: x), t)
+  end
+
+  defp nest_get_in(h, _var, []) do
+    h
+  end
+
+  defp nest_get_in(h, var, [{:map, key} | tail]) do
+    quote generated: true do
+      case unquote(h) do
+        %{unquote(key) => unquote(var)} -> unquote(nest_get_in(var, var, tail))
+        nil -> nil
+        unquote(var) -> :erlang.error({:badkey, unquote(key), unquote(var)})
+      end
+    end
+  end
+
+  defp nest_get_in(h, var, [{:access, key} | tail]) do
+    h = quote do: Access.get(unquote(h), unquote(key))
+    nest_get_in(h, var, tail)
+  end
+
+  @doc """
   Puts a value in a nested structure via the given `path`.
 
   This is similar to `put_in/3`, except the path is extracted via
@@ -3016,7 +3064,7 @@ defmodule Kernel do
   defmacro put_in(path, value) do
     case unnest(path, [], true, "put_in/2") do
       {[h | t], true} ->
-        nest_update_in(h, t, quote(do: fn _ -> unquote(value) end))
+        nest_map_update_in(h, t, quote(do: fn _ -> unquote(value) end))
 
       {[h | t], false} ->
         expr = nest_get_and_update_in(h, t, quote(do: fn _ -> {nil, unquote(value)} end))
@@ -3093,7 +3141,7 @@ defmodule Kernel do
   defmacro update_in(path, fun) do
     case unnest(path, [], true, "update_in/2") do
       {[h | t], true} ->
-        nest_update_in(h, t, fun)
+        nest_map_update_in(h, t, fun)
 
       {[h | t], false} ->
         expr = nest_get_and_update_in(h, t, quote(do: fn x -> {nil, unquote(fun).(x)} end))
@@ -3159,17 +3207,17 @@ defmodule Kernel do
     nest_get_and_update_in(h, t, fun)
   end
 
-  defp nest_update_in([], fun), do: fun
+  defp nest_map_update_in([], fun), do: fun
 
-  defp nest_update_in(list, fun) do
+  defp nest_map_update_in(list, fun) do
     quote do
-      fn x -> unquote(nest_update_in(quote(do: x), list, fun)) end
+      fn x -> unquote(nest_map_update_in(quote(do: x), list, fun)) end
     end
   end
 
-  defp nest_update_in(h, [{:map, key} | t], fun) do
+  defp nest_map_update_in(h, [{:map, key} | t], fun) do
     quote do
-      Map.update!(unquote(h), unquote(key), unquote(nest_update_in(t, fun)))
+      Map.update!(unquote(h), unquote(key), unquote(nest_map_update_in(t, fun)))
     end
   end
 
@@ -4970,17 +5018,15 @@ defmodule Kernel do
   defp alias_meta(_), do: []
 
   # We don't want to trace :alias_reference since we are defining the alias
-  defp expand_module_alias({:__aliases__, _, _} = original, env) do
-    case :elixir_aliases.expand_or_concat(original, env) do
+  defp expand_module_alias({:__aliases__, meta, list} = alias, env) do
+    case :elixir_aliases.expand_or_concat(meta, list, env, true) do
       receiver when is_atom(receiver) ->
         receiver
 
-      aliases ->
-        aliases = :lists.map(&Macro.expand(&1, env), aliases)
-
-        case :lists.all(&is_atom/1, aliases) do
-          true -> :elixir_aliases.concat(aliases)
-          false -> original
+      [head | tail] ->
+        case Macro.expand(head, env) do
+          head when is_atom(head) -> :elixir_aliases.concat([head | tail])
+          _ -> alias
         end
     end
   end
@@ -6053,8 +6099,7 @@ defmodule Kernel do
   Handles the sigil `~S` for strings.
 
   It returns a string without interpolations and without escape
-  characters, except for the escaping of the closing sigil character
-  itself.
+  characters.
 
   ## Examples
 
@@ -6064,12 +6109,6 @@ defmodule Kernel do
       "f\#{o}o"
       iex> ~S(\o/)
       "\\o/"
-
-  However, if you want to reuse the sigil character itself on
-  the string, you need to escape it:
-
-      iex> ~S((\))
-      "()"
 
   """
   defmacro sigil_S(term, modifiers)
@@ -6107,8 +6146,7 @@ defmodule Kernel do
   Handles the sigil `~C` for charlists.
 
   It returns a charlist without interpolations and without escape
-  characters, except for the escaping of the closing sigil character
-  itself.
+  characters.
 
   A charlist is a list of integers where all the integers are valid code points.
   The three expressions below are equivalent:
@@ -6518,8 +6556,7 @@ defmodule Kernel do
   Handles the sigil `~W` for list of words.
 
   It returns a list of "words" split by whitespace without interpolations
-  and without escape characters, except for the escaping of the closing
-  sigil character itself.
+  and without escape characters.
 
   ## Modifiers
 

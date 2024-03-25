@@ -3,7 +3,7 @@ defmodule Mix.Tasks.Test do
 
   alias Mix.Compilers.Test, as: CT
 
-  @compile {:no_warn_undefined, [ExUnit, ExUnit.Filters]}
+  @compile {:no_warn_undefined, [IEx, ExUnit, ExUnit.Filters]}
   @shortdoc "Runs a project's tests"
   @recursive true
 
@@ -109,11 +109,17 @@ defmodule Mix.Tasks.Test do
     * `--all-warnings` (`--no-all-warnings`) - prints all warnings, including previous compilations
       (default is true except on errors)
 
+    * `-b`, `--breakpoints` *(since v1.17.0)* - sets a breakpoint at the beginning
+      of every test. The debugger goes line-by-line and can access all variables
+      and imports (but not local functions). You can press `n` for the next line
+      and `c` for the next test. This automatically sets `--trace`
+
     * `--color` - enables color in the output
 
     * `--cover` - runs coverage tool. See "Coverage" section below
 
-    * `--exclude` - excludes tests that match the filter
+    * `--exclude` - excludes tests that match the filter. This option may be given
+      several times to apply different filters, such as `--exclude ci --exclude slow`
 
     * `--exit-status` - use an alternate exit status to use when the test suite
       fails (default is 2).
@@ -128,7 +134,8 @@ defmodule Mix.Tasks.Test do
     * `--formatter` - sets the formatter module that will print the results.
       Defaults to ExUnit's built-in CLI formatter
 
-    * `--include` - includes tests that match the filter
+    * `--include` - includes tests that match the filter. This option may be given
+      several times to apply different filters, such as `--include ci --include slow`
 
     * `--listen-on-stdin` - runs tests, and then listens on stdin. It will
       re-run tests once a newline is received. See the "File system watchers"
@@ -163,9 +170,17 @@ defmodule Mix.Tasks.Test do
     * `--preload-modules` - preloads all modules defined in applications
 
     * `--profile-require time` - profiles the time spent to require test files.
-      Used only for debugging. The test suite does not run.
+      Used only for debugging. The test suite does not run
 
-    * `--raise` - raises if the test suite failed
+    * `--raise` - immediately raises if the test suite fails, instead of continuing
+      the execution of other Mix tasks
+
+    * `--repeat-until-failure` - sets the number of repetitions for running the test suite
+      until it fails. This is useful for debugging flaky tests within the same instance
+      of the Erlang VM. For example, `--repeat-until-failure 10000` repeats the test suite
+      up to 10000 times until the first failure. This can be combined with `--max-failures 1`
+      to immediately stop if one test fails. However, if there is any leftover global state
+      after running the tests, re-running the suite may trigger unrelated failures.
 
     * `--seed` - seeds the random number generator used to randomize the order of tests;
       `--seed 0` disables randomization so the tests in a single file will always be ran
@@ -183,7 +198,7 @@ defmodule Mix.Tasks.Test do
     * `--trace` - runs tests with detailed reporting. Automatically sets `--max-cases` to `1`.
       Note that in trace mode test timeouts will be ignored as timeout is set to `:infinity`
 
-    * `--warnings-as-errors` - (since v1.12.0) treats warnings as errors and returns a non-zero
+    * `--warnings-as-errors` *(since v1.12.0)* - treats warnings as errors and returns a non-zero
       exit status. This option only applies to test files. To treat warnings as errors during
       compilation and during tests, run:
           MIX_ENV=test mix do compile --warnings-as-errors + test --warnings-as-errors
@@ -410,6 +425,7 @@ defmodule Mix.Tasks.Test do
 
   @switches [
     all_warnings: :boolean,
+    breakpoints: :boolean,
     force: :boolean,
     color: :boolean,
     cover: :boolean,
@@ -433,18 +449,20 @@ defmodule Mix.Tasks.Test do
     listen_on_stdin: :boolean,
     formatter: :keep,
     slowest: :integer,
+    slowest_modules: :integer,
     partitions: :integer,
     preload_modules: :boolean,
     warnings_as_errors: :boolean,
     profile_require: :string,
-    exit_status: :integer
+    exit_status: :integer,
+    repeat_until_failure: :integer
   ]
 
   @cover [output: "cover", tool: Mix.Tasks.Test.Coverage]
 
   @impl true
   def run(args) do
-    {opts, files} = OptionParser.parse!(args, strict: @switches)
+    {opts, files} = OptionParser.parse!(args, strict: @switches, aliases: [b: :breakpoints])
 
     if not Mix.Task.recursing?() do
       do_run(opts, args, files)
@@ -544,6 +562,20 @@ defmodule Mix.Tasks.Test do
 
     # The test helper may change the Mix.shell(), so revert it whenever we raise and after suite
     shell = Mix.shell()
+    test_elixirc_options = project[:test_elixirc_options] || []
+
+    {test_elixirc_options, opts} =
+      cond do
+        not Keyword.get(opts, :breakpoints, false) ->
+          {test_elixirc_options, opts}
+
+        IEx.started?() ->
+          {Keyword.put(test_elixirc_options, :debug_info, true), opts}
+
+        true ->
+          Mix.shell().error("you must run \"iex -S mix test\" when using -b/--breakpoints")
+          {test_elixirc_options, Keyword.delete(opts, :breakpoints)}
+      end
 
     # Configure ExUnit now and then again so the task options override test_helper.exs
     {ex_unit_opts, allowed_files} = process_ex_unit_opts(opts)
@@ -554,7 +586,6 @@ defmodule Mix.Tasks.Test do
     ExUnit.configure(merge_helper_opts(ex_unit_opts))
 
     # Finally parse, require and load the files
-    test_elixirc_options = project[:test_elixirc_options] || []
     test_files = if files != [], do: parse_file_paths(files), else: test_paths
     test_pattern = project[:test_pattern] || "*_test.exs"
     warn_test_pattern = project[:warn_test_pattern] || "*_test.ex"
@@ -642,6 +673,7 @@ defmodule Mix.Tasks.Test do
   end
 
   @option_keys [
+    :breakpoints,
     :trace,
     :max_cases,
     :max_failures,
@@ -652,10 +684,12 @@ defmodule Mix.Tasks.Test do
     :formatters,
     :colors,
     :slowest,
+    :slowest_modules,
     :failures_manifest_file,
     :only_test_ids,
     :test_location_relative_path,
-    :exit_status
+    :exit_status,
+    :repeat_until_failure
   ]
 
   @doc false
@@ -678,17 +712,12 @@ defmodule Mix.Tasks.Test do
 
   defp merge_helper_opts(opts) do
     # The only options that are additive from app env are the excludes
-    merge_opts(opts, :exclude)
-  end
-
-  defp merge_opts(opts, key) do
-    value = List.wrap(Application.get_env(:ex_unit, key, []))
-    Keyword.update(opts, key, value, &Enum.uniq(&1 ++ value))
+    value = List.wrap(Application.get_env(:ex_unit, :exclude, []))
+    Keyword.update(opts, :exclude, value, &Enum.uniq(&1 ++ value))
   end
 
   defp default_opts(opts) do
-    # Set autorun to false because Mix
-    # automatically runs the test suite for us.
+    # Set autorun to false because Mix automatically runs the test suite for us.
     [autorun: false] ++ opts
   end
 

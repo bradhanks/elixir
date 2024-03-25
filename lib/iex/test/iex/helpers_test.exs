@@ -144,7 +144,7 @@ defmodule IEx.HelpersTest do
   describe "open" do
     @iex_helpers "iex/lib/iex/helpers.ex"
     @elixir_erl "elixir/src/elixir.erl"
-    @lists_erl "#{:code.lib_dir(:stdlib, :src)}/lists.erl"
+    @lists_erl Application.app_dir(:stdlib, "src/lists.erl")
     @httpc_erl "src/http_client/httpc.erl"
     @editor System.get_env("ELIXIR_EDITOR")
 
@@ -332,17 +332,26 @@ defmodule IEx.HelpersTest do
       assert help =~ "Welcome to Interactive Elixir"
     end
 
+    @tag :erlang_doc
     test "prints Erlang module documentation" do
       captured = capture_io(fn -> h(:timer) end)
       assert captured =~ "This module provides useful functions related to time."
     end
 
+    @tag :erlang_doc
     test "prints Erlang module function specs" do
       captured = capture_io(fn -> h(:timer.sleep() / 1) end)
       assert captured =~ ":timer.sleep/1"
-      assert captured =~ "-spec sleep(Time) -> ok when Time :: timeout()."
+
+      # TODO Fix for OTP 27 once specs are available
+      if System.otp_release() < "27" do
+        assert captured =~ "-spec sleep(Time) -> ok when Time :: timeout()."
+      else
+        assert captured =~ "sleep(Time)"
+      end
     end
 
+    @tag :erlang_doc
     test "handles non-existing Erlang module function" do
       captured = capture_io(fn -> h(:timer.baz() / 1) end)
       assert captured =~ "No documentation for :timer.baz was found"
@@ -802,7 +811,7 @@ defmodule IEx.HelpersTest do
 
       assert capture_io(fn -> b(NoMix.run()) end) == "Could not load module NoMix, got: nofile\n"
 
-      assert capture_io(fn -> b(Exception.message() / 1) end) ==
+      assert capture_io(fn -> b(Exception.message() / 1) end) =~
                "@callback message(t()) :: String.t()\n\n"
 
       assert capture_io(fn -> b(:gen_server.handle_cast() / 2) end) =~
@@ -1008,23 +1017,47 @@ defmodule IEx.HelpersTest do
       cleanup_modules([TypeSample])
     end
 
-    test "prints all types in erlang module" do
+    @tag :erlang_doc
+    test "prints all types in Erlang module" do
       captured = capture_io(fn -> t(:queue) end)
-      assert captured =~ "-type queue() :: queue(_)"
-      assert captured =~ "-opaque queue(Item)"
+
+      # TODO Fix for OTP 27 once specs are available
+      if System.otp_release() < "27" do
+        assert captured =~ "-type queue() :: queue(_)"
+        assert captured =~ "-opaque queue(Item)"
+      else
+        assert captured =~ "queue()"
+        assert captured =~ "queue(Item)"
+      end
     end
 
-    test "prints single type from erlang module" do
+    @tag :erlang_doc
+    test "prints single type from Erlang module" do
       captured = capture_io(fn -> t(:erlang.iovec()) end)
-      assert captured =~ "-type iovec() :: [binary()]"
+
+      # TODO Fix for OTP 27 once specs are available
+      if System.otp_release() < "27" do
+        assert captured =~ "-type iovec() :: [binary()]"
+      else
+        assert captured =~ "iovec()"
+      end
+
       assert captured =~ "A list of binaries."
 
       captured = capture_io(fn -> t(:erlang.iovec() / 0) end)
-      assert captured =~ "-type iovec() :: [binary()]"
+
+      # TODO Fix for OTP 27 once specs are available
+      if System.otp_release() < "27" do
+        assert captured =~ "-type iovec() :: [binary()]"
+      else
+        assert captured =~ "iovec()"
+      end
+
       assert captured =~ "A list of binaries."
     end
 
-    test "handles non-existing types from erlang module" do
+    @tag :erlang_doc
+    test "handles non-existing types from Erlang module" do
       captured = capture_io(fn -> t(:erlang.foo()) end)
       assert captured =~ "No type information for :erlang.foo was found or :erlang.foo is private"
 
@@ -1041,6 +1074,29 @@ defmodule IEx.HelpersTest do
       assert capture_iex("1\n2\nv(2)") == "1\n2\n2"
       assert capture_iex("1\n2\nv(2)") == capture_iex("1\n2\nv(-1)")
       assert capture_iex("1\n2\nv(2)") == capture_iex("1\n2\nv()")
+    end
+
+    test "returns proper error when trying to access history out of bounds" do
+      # We evaluate 22 statements as 20 is the current limit for iex history
+      assert capture_iex("""
+             \n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n
+             v(1)
+             """) =~
+               "(RuntimeError) v(1) is out of bounds, the currently preserved history ranges from 3 to 22"
+    end
+
+    test "negative lookup works properly after crashes" do
+      capture =
+        capture_iex("""
+            \n
+            \n
+            \n
+            Process.exit(self(), :some_reason)\n
+            :target_value
+            v(-1)
+        """)
+
+      assert capture |> String.split("\n") |> List.last() == ":target_value"
     end
   end
 

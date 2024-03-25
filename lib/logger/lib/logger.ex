@@ -119,6 +119,10 @@ defmodule Logger do
 
     * `:registered_name` - the process registered name as an atom
 
+    * `:process_label` - (available from Erlang/OTP 27+) an arbitrary term
+      which can be added to a process with `Process.set_label/1` for
+      debugging purposes
+
     * `:domain` - a list of domains for the logged message. For example,
       all Elixir reports default to `[:elixir]`. Erlang reports may start
       with `[:otp]` or `[:sasl]`
@@ -326,13 +330,14 @@ defmodule Logger do
   ## Erlang/OTP handlers
 
   Handlers represent the ability to integrate into the logging system to
-  handle each logged message/event. Elixir automatically configures the
-  default handler, but you can use Erlang's [`:logger`](`:logger`) module
-  to add other handlers too.
+  handle each logged message/event. Elixir's Logger automatically sets a
+  default handler based on Erlang's `:logger_std_h`, which you can configure
+  using the `:default_handler` boot configuration outlined above. You may
+  also attach additional handlers when you boot your application.
 
-  Erlang/OTP handlers must be listed under your own application.
-  For example, to setup an additional handler, so you write to
-  console and file:
+  To do so, you must list a series of handlers under the `:logger` key
+  of your application configuration. For example, to setup an additional
+  handler that writes to a file:
 
       config :my_app, :logger, [
         {:handler, :file_log, :logger_std_h, %{
@@ -354,7 +359,10 @@ defmodule Logger do
 
       Logger.add_handlers(:my_app)
 
-  You can also develop your own handlers. Handlers run in the same
+  You can also add, remove, and update handlers at runtime with the help
+  of the Erlang's [`:logger`](`:logger`) module.
+
+  You may also develop your own handlers. Handlers run in the same
   process as the process logging the message/event. This gives developers
   flexibility but they should avoid performing any long running action in
   such handlers, as it may slow down the action being executed considerably.
@@ -368,7 +376,7 @@ defmodule Logger do
 
   ### Filtering
 
-  You can add filters to Erlang's `:logger`. For example, to filter out logs
+  You can add filters to any handler. For example, to filter out logs
   that contain a particular string, you could create a module:
 
       defmodule LogFilter do

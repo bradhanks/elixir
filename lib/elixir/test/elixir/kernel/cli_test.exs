@@ -65,16 +65,19 @@ defmodule Kernel.CLITest do
     {output, 0} = System.cmd(elixir_executable(), ["--eval", "IO.puts :hello_world123"])
     assert output =~ "hello_world123"
 
-    {output, 0} =
-      System.cmd(iex_executable(), ["--eval", "IO.puts :hello_world123; System.halt()"])
-
-    assert output =~ "hello_world123"
-
     {output, 0} = System.cmd(elixir_executable(), ["-e", "IO.puts :hello_world123"])
     assert output =~ "hello_world123"
 
-    {output, 0} = System.cmd(iex_executable(), ["-e", "IO.puts :hello_world123; System.halt()"])
-    assert output =~ "hello_world123"
+    # TODO: remove this once we bump CI to 26.3
+    unless windows?() and System.otp_release() == "26" do
+      {output, 0} =
+        System.cmd(iex_executable(), ["--eval", "IO.puts :hello_world123; System.halt()"])
+
+      assert output =~ "hello_world123"
+
+      {output, 0} = System.cmd(iex_executable(), ["-e", "IO.puts :hello_world123; System.halt()"])
+      assert output =~ "hello_world123"
+    end
   end
 
   test "--version smoke test" do

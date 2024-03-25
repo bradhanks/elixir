@@ -28,6 +28,41 @@ defmodule ExUnit.CaptureIOTest do
     end
   end
 
+  defmodule MockProc do
+    use GenServer
+
+    def start_link(gl) do
+      GenServer.start_link(__MODULE__, gl)
+    end
+
+    @impl GenServer
+    def init(gl) do
+      Process.group_leader(self(), gl)
+      {:ok, nil}
+    end
+
+    @impl GenServer
+    def handle_call({:stdio, message}, _from, state) do
+      IO.puts(message)
+      {:reply, :ok, state}
+    end
+
+    @impl GenServer
+    def handle_call({:prompt, prompt}, _from, state) do
+      prompt
+      |> IO.gets()
+      |> IO.puts()
+
+      {:reply, :ok, state}
+    end
+
+    @impl GenServer
+    def handle_call({:stderr, message}, _from, state) do
+      IO.puts(:stderr, message)
+      {:reply, :ok, state}
+    end
+  end
+
   import ExUnit.CaptureIO
   doctest ExUnit.CaptureIO, import: true
 
@@ -216,7 +251,15 @@ defmodule ExUnit.CaptureIOTest do
       end)
 
       capture_io("\"a", fn ->
-        assert :io.scan_erl_form(~c">") == {:error, {1, :erl_scan, {:string, 34, ~c"a"}}, 1}
+        # TODO: Remove me when we require Erlang/OTP 27+
+        expected_error =
+          if System.otp_release() >= "27" do
+            {1, :erl_scan, {:unterminated, :string, ~c"a"}}
+          else
+            {1, :erl_scan, {:string, 34, ~c"a"}}
+          end
+
+        assert :io.scan_erl_form(~c">") == {:error, expected_error, 1}
         assert :io.scan_erl_form(~c">") == {:eof, 1}
       end)
 
@@ -459,6 +502,36 @@ defmodule ExUnit.CaptureIOTest do
 
       assert capture_io(:stderr, [input: "b"], fn -> :ok end)
     end
+  end
+
+  test "capture_io with a separate process" do
+    {:ok, gl} = StringIO.open("")
+    pid = start_supervised!({MockProc, gl})
+
+    assert Process.info(pid, :group_leader) == {:group_leader, gl}
+
+    assert capture_io(pid, fn ->
+             GenServer.call(pid, {:stdio, "a"})
+           end) == "a\n"
+
+    assert capture_io(pid, [input: "b"], fn ->
+             GenServer.call(pid, {:prompt, "> "})
+           end) == "> b\n"
+
+    assert capture_io(pid, "c", fn ->
+             GenServer.call(pid, {:prompt, "> "})
+           end) == "> c\n"
+
+    assert capture_io(pid, [input: "d", capture_prompt: false], fn ->
+             GenServer.call(pid, {:prompt, "> "})
+           end) == "d\n"
+
+    assert capture_io(:stderr, fn ->
+             GenServer.call(pid, {:stderr, "uhoh"})
+           end) == "uhoh\n"
+
+    assert Process.info(pid, :group_leader) == {:group_leader, gl}
+    assert StringIO.contents(gl) == {"", ""}
   end
 
   test "with_io" do

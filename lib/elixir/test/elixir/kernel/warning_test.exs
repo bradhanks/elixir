@@ -196,10 +196,10 @@ defmodule Kernel.WarningTest do
   test "operators formed by many of the same character followed by that character" do
     assert_warn_eval(
       [
-        "nofile:1:11",
-        "found \"...\" followed by \".\", please use parens around \"...\" instead"
+        "nofile:1:12",
+        "found \"+++\" followed by \"+\", please use a space between \"+++\" and the next \"+\""
       ],
-      "quote do: ....()"
+      "quote do: 1++++1"
     )
   end
 
@@ -823,16 +823,26 @@ defmodule Kernel.WarningTest do
 
   test "unused import of any of the functions in :only" do
     assert_warn_compile(
-      ["nofile:2:3", "unused import String"],
+      ["nofile:1:1", "unused import String"],
       """
-      defmodule Sample do
-        import String, only: [upcase: 1, downcase: 1]
-        def a, do: nil
-      end
+      import String, only: [upcase: 1, downcase: 1]
       """
     )
-  after
-    purge(Sample)
+  end
+
+  def with(a, b, c), do: [a, b, c]
+
+  test "import matches special form" do
+    assert_warn_compile(
+      [
+        "nofile:1:1",
+        "cannot import Kernel.WarningTest.with/3 because it conflicts with Elixir special forms"
+      ],
+      """
+      import Kernel.WarningTest, only: [with: 3]
+      :ok = with true <- true, true <- true, do: :ok
+      """
+    )
   end
 
   test "duplicated function on import options" do
@@ -904,11 +914,11 @@ defmodule Kernel.WarningTest do
     assert_warn_eval(
       [
         "key :a will be overridden in map",
-        "nofile:4:11\n",
+        "nofile:4:10\n",
         "key :m will be overridden in map",
-        "nofile:5:11\n",
+        "nofile:5:10\n",
         "key 1 will be overridden in map",
-        "nofile:6:11\n"
+        "nofile:6:10\n"
       ],
       """
       defmodule DuplicateMapKeys do
@@ -1097,6 +1107,10 @@ defmodule Kernel.WarningTest do
   after
     purge(Sample)
     purge(UseSample)
+  end
+
+  test "deprecated closing sigil delimiter" do
+    assert_warn_eval(["nofile:1:7", "deprecated"], "~S(foo\\))")
   end
 
   test "deprecated not left in right" do

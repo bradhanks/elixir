@@ -6,7 +6,8 @@ defmodule Code.Formatter do
   @double_heredoc "\"\"\""
   @single_quote "'"
   @single_heredoc "'''"
-  @sigil_c "~c\""
+  @sigil_c_double "~c\""
+  @sigil_c_single "~c'"
   @sigil_c_heredoc "~c\"\"\""
   @newlines 2
   @min_line 0
@@ -300,7 +301,7 @@ defmodule Code.Formatter do
         remote_to_algebra(quoted, context, state)
 
       meta[:delimiter] == ~s['''] ->
-        {opener, quotes} = get_charlist_quotes(true, state)
+        {opener, quotes} = get_charlist_quotes(:heredoc, state)
 
         {doc, state} =
           entries
@@ -310,7 +311,7 @@ defmodule Code.Formatter do
         {force_unfit(doc), state}
 
       true ->
-        {opener, quotes} = get_charlist_quotes(false, state)
+        {opener, quotes} = get_charlist_quotes({:regular, entries}, state)
         list_interpolation_to_algebra(entries, quotes, state, opener, quotes)
     end
   end
@@ -366,16 +367,22 @@ defmodule Code.Formatter do
     tuple_to_algebra(meta, [left, right], :flex_break, state)
   end
 
+  # (left -> right)
+  defp quoted_to_algebra({:__block__, _, [[{:->, _, _} | _] = clauses]}, _context, state) do
+    paren_fun_to_algebra(clauses, @max_line, @min_line, state)
+  end
+
   defp quoted_to_algebra({:__block__, meta, [list]}, _context, state) when is_list(list) do
     case meta[:delimiter] do
       ~s['''] ->
-        {opener, quotes} = get_charlist_quotes(true, state)
+        {opener, quotes} = get_charlist_quotes(:heredoc, state)
         string = list |> List.to_string() |> escape_heredoc(quotes)
         {opener |> concat(string) |> concat(quotes) |> force_unfit(), state}
 
       ~s['] ->
-        {opener, quotes} = get_charlist_quotes(false, state)
-        string = list |> List.to_string() |> escape_string(quotes)
+        string = list |> List.to_string()
+        {opener, quotes} = get_charlist_quotes({:regular, [string]}, state)
+        string = escape_string(string, quotes)
         {opener |> concat(string) |> concat(quotes), state}
 
       _other ->
@@ -415,6 +422,7 @@ defmodule Code.Formatter do
     {Keyword.fetch!(meta, :token) |> float_to_algebra(state.inspect_opts), state}
   end
 
+  # (unquote_splicing(...))
   defp quoted_to_algebra(
          {:__block__, _meta, [{:unquote_splicing, meta, [_] = args}]},
          context,
@@ -478,6 +486,11 @@ defmodule Code.Formatter do
     end
   end
 
+  # ...
+  defp quoted_to_algebra({:..., _meta, []}, _context, state) do
+    {"...", state}
+  end
+
   # 1..2//3
   defp quoted_to_algebra({:"..//", meta, [left, middle, right]}, context, state) do
     quoted_to_algebra({:"//", meta, [{:.., meta, [left, middle]}, right]}, context, state)
@@ -496,11 +509,6 @@ defmodule Code.Formatter do
 
   defp quoted_to_algebra({_, _, args} = quoted, context, state) when is_list(args) do
     remote_to_algebra(quoted, context, state)
-  end
-
-  # (left -> right)
-  defp quoted_to_algebra([{:->, _, _} | _] = clauses, _context, state) do
-    paren_fun_to_algebra(clauses, @max_line, @min_line, state)
   end
 
   # [keyword: :list] (inner part)
@@ -629,7 +637,7 @@ defmodule Code.Formatter do
 
   defp maybe_binary_op_to_algebra(fun, meta, args, context, state) do
     with [left, right] <- args,
-         {_, _} <- Code.Identifier.binary_op(fun) do
+         {_, _} <- augmented_binary_op(fun) do
       binary_op_to_algebra(fun, Atom.to_string(fun), meta, left, right, context, state)
     else
       _ -> :error
@@ -656,7 +664,7 @@ defmodule Code.Formatter do
 
   defp binary_op_to_algebra(op, op_string, meta, left_arg, right_arg, context, state, _nesting)
        when op in @right_new_line_before_binary_operators do
-    op_info = Code.Identifier.binary_op(op)
+    op_info = augmented_binary_op(op)
     op_string = op_string <> " "
     left_context = left_op_context(context)
     right_context = right_op_context(context)
@@ -693,7 +701,7 @@ defmodule Code.Formatter do
 
   defp binary_op_to_algebra(op, _, meta, left_arg, right_arg, context, state, _nesting)
        when op in @pipeline_operators do
-    op_info = Code.Identifier.binary_op(op)
+    op_info = augmented_binary_op(op)
     left_context = left_op_context(context)
     right_context = right_op_context(context)
     max_line = line(meta)
@@ -707,7 +715,7 @@ defmodule Code.Formatter do
         {{doc, @empty, 1}, state}
 
       {{op, context}, arg}, _args, state ->
-        op_info = Code.Identifier.binary_op(op)
+        op_info = augmented_binary_op(op)
         op_string = Atom.to_string(op) <> " "
         {doc, state} = binary_operand_to_algebra(arg, context, state, op, op_info, :right, 0)
         {{concat(op_string, doc), @empty, 1}, state}
@@ -717,7 +725,7 @@ defmodule Code.Formatter do
   end
 
   defp binary_op_to_algebra(op, op_string, meta, left_arg, right_arg, context, state, nesting) do
-    op_info = Code.Identifier.binary_op(op)
+    op_info = augmented_binary_op(op)
     left_context = left_op_context(context)
     right_context = right_op_context(context)
 
@@ -776,7 +784,7 @@ defmodule Code.Formatter do
     {parent_assoc, parent_prec} = parent_info
 
     with {op, meta, [left, right]} <- operand,
-         op_info = Code.Identifier.binary_op(op),
+         op_info = augmented_binary_op(op),
          {_assoc, prec} <- op_info do
       op_string = Atom.to_string(op)
 
@@ -2187,10 +2195,15 @@ defmodule Code.Formatter do
     unary_operator?(quoted) or binary_operator?(quoted)
   end
 
+  # We convert ..// into two operators for simplicity,
+  # so we need to augment the binary table.
+  defp augmented_binary_op(:"//"), do: {:right, 190}
+  defp augmented_binary_op(op), do: Code.Identifier.binary_op(op)
+
   defp binary_operator?(quoted) do
     case quoted do
       {op, _, [_, _, _]} when op in @multi_binary_operators -> true
-      {op, _, [_, _]} when is_atom(op) -> Code.Identifier.binary_op(op) != :error
+      {op, _, [_, _]} when is_atom(op) -> augmented_binary_op(op) != :error
       _ -> false
     end
   end
@@ -2412,19 +2425,23 @@ defmodule Code.Formatter do
     {left, right}
   end
 
-  defp get_charlist_quotes(_heredoc = false, state) do
-    if state.normalize_charlists_as_sigils do
-      {@sigil_c, @double_quote}
-    else
-      {@single_quote, @single_quote}
-    end
-  end
-
-  defp get_charlist_quotes(_heredoc = true, state) do
+  defp get_charlist_quotes(:heredoc, state) do
     if state.normalize_charlists_as_sigils do
       {@sigil_c_heredoc, @double_heredoc}
     else
       {@single_heredoc, @single_heredoc}
     end
+  end
+
+  defp get_charlist_quotes({:regular, chunks}, state) do
+    cond do
+      !state.normalize_charlists_as_sigils -> {@single_quote, @single_quote}
+      Enum.any?(chunks, &has_double_quote?/1) -> {@sigil_c_single, @single_quote}
+      true -> {@sigil_c_double, @double_quote}
+    end
+  end
+
+  defp has_double_quote?(chunk) do
+    is_binary(chunk) and chunk =~ @double_quote
   end
 end

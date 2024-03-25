@@ -757,8 +757,7 @@ defmodule Mix.Tasks.Release do
   We document this structure for completeness. In practice, developers
   should not modify any of those files after the release is assembled.
   Instead use env scripts, custom config provider, overlays, and all
-  other mechanisms described in this guide to configure how your release
-  works.
+  other mechanisms described here to configure how your release works.
 
   ## Environment variables
 
@@ -1021,7 +1020,7 @@ defmodule Mix.Tasks.Release do
     * `--no-deps-check` - does not check dependencies
     * `--no-elixir-version-check` - does not check Elixir version
     * `--no-compile` - does not compile before assembling the release
-    * `--overwrite` - if there is an existing release version, overwrite it
+    * `--overwrite` - overwrite existing files instead of prompting the user for action
     * `--path` - the path of the release
     * `--quiet` - does not write progress to the standard output
     * `--version` - the version of the release

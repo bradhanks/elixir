@@ -22,33 +22,44 @@ defmodule IEx.Helpers do
 
   There are many other helpers available, here are some examples:
 
-    * `b/1`            - prints callbacks info and docs for a given module
-    * `c/1`            - compiles a file
-    * `c/2`            - compiles a file and writes bytecode to the given path
-    * `cd/1`           - changes the current directory
-    * `clear/0`        - clears the screen
-    * `exports/1`      - shows all exports (functions + macros) in a module
-    * `flush/0`        - flushes all messages sent to the shell
-    * `h/0`            - prints this help message
-    * `h/1`            - prints help for the given module, function or macro
-    * `i/0`            - prints information about the last value
-    * `i/1`            - prints information about the given term
-    * `ls/0`           - lists the contents of the current directory
-    * `ls/1`           - lists the contents of the specified directory
-    * `open/1`         - opens the source for the given module or function in your editor
-    * `pid/1`          - creates a PID from a string
-    * `pid/3`          - creates a PID with the 3 integer arguments passed
-    * `port/1`         - creates a port from a string
-    * `port/2`         - creates a port with the 2 non-negative integers passed
-    * `pwd/0`          - prints the current working directory
-    * `r/1`            - recompiles the given module's source file
-    * `recompile/0`    - recompiles the current project
-    * `ref/1`          - creates a reference from a string
-    * `ref/4`          - creates a reference with the 4 integer arguments passed
-    * `runtime_info/0` - prints runtime info (versions, memory usage, stats)
-    * `t/1`            - prints the types for the given module or function
-    * `v/0`            - retrieves the last value from the history
-    * `v/1`            - retrieves the nth value from the history
+    * `b/1`             - prints callbacks info and docs for a given module
+    * `c/1`             - compiles a file
+    * `c/2`             - compiles a file and writes bytecode to the given path
+    * `cd/1`            - changes the current directory
+    * `clear/0`         - clears the screen
+    * `exports/1`       - shows all exports (functions + macros) in a module
+    * `flush/0`         - flushes all messages sent to the shell
+    * `h/0`             - prints this help message
+    * `h/1`             - prints help for the given module, function or macro
+    * `i/0`             - prints information about the last value
+    * `i/1`             - prints information about the given term
+    * `ls/0`            - lists the contents of the current directory
+    * `ls/1`            - lists the contents of the specified directory
+    * `open/1`          - opens the source for the given module or function in your editor
+    * `pid/1`           - creates a PID from a string
+    * `pid/3`           - creates a PID with the 3 integer arguments passed
+    * `port/1`          - creates a port from a string
+    * `port/2`          - creates a port with the 2 non-negative integers passed
+    * `pwd/0`           - prints the current working directory
+    * `r/1`             - recompiles the given module's source file
+    * `recompile/0`     - recompiles the current project
+    * `ref/1`           - creates a reference from a string
+    * `ref/4`           - creates a reference with the 4 integer arguments passed
+    * `runtime_info/0`  - prints runtime info (versions, memory usage, stats)
+    * `t/1`             - prints the types for the given module or function
+    * `v/0`             - retrieves the last value from the history
+    * `v/1`             - retrieves the nth value from the history
+
+  There are also several helpers available when debugging, such as:
+
+    * `break!/2`        - sets a breakpoint at `Module.function/arity`
+    * `breaks/0`        - prints all breakpoints to the terminal
+    * `c/0`             - a shortcut for `continue/0`
+    * `continue/0`      - continues execution of the current process
+    * `n/0`             - a shortcut for `next/0`
+    * `next/0`          - goes to the next line of the current breakpoint
+    * `remove_breaks/0` - removes all breakpoints and instrumentation from all modules
+    * `whereami/1`      - prints the current location and stacktrace in a pry session
 
   Help for all of those functions can be consulted directly from
   the command line using the `h/1` helper itself. Try:
@@ -69,17 +80,22 @@ defmodule IEx.Helpers do
   import IEx, only: [dont_display_result: 0]
 
   @doc """
-  Recompiles the current Mix project.
+  Recompiles the current Mix project or Mix install
+  dependencies.
 
-  This helper only works when IEx is started with a Mix
-  project, for example, `iex -S mix`. Note this function
-  simply recompiles Elixir modules, without reloading
-  configuration, recompiling dependencies, or restarting
-  applications.
+  This helper requires either `Mix.install/2` to have been
+  called within the current IEx session or for IEx to be
+  started alongside, for example, `iex -S mix`.
 
-  Therefore, any long running process may crash on recompilation,
-  as changed modules will be temporarily removed and recompiled,
-  without going through the proper code change callback.
+  In the `Mix.install/1` case, it will recompile any outdated
+  path dependency declared during install. Within a project,
+  it will recompile any outdated module.
+
+  Note this function simply recompiles Elixir modules, without
+  reloading configuration or restarting applications. This means
+  any long running process may crash on recompilation, as changed
+  modules will be temporarily removed and recompiled, without
+  going through the proper code change callback.
 
   If you want to reload a single module, consider using
   `r(ModuleName)` instead.
@@ -93,21 +109,52 @@ defmodule IEx.Helpers do
 
   """
   def recompile(options \\ []) do
-    if mix_started?() do
-      config = Mix.Project.config()
-      consolidation = Mix.Project.consolidation_path(config)
-      reenable_tasks(config)
+    cond do
+      not mix_started?() ->
+        IO.puts(IEx.color(:eval_error, "Mix is not running. Please start IEx with: iex -S mix"))
+        :error
 
-      force? = Keyword.get(options, :force, false)
-      args = ["--purge-consolidation-path-if-stale", "--return-errors", consolidation]
-      args = if force?, do: ["--force" | args], else: args
+      Mix.installed?() ->
+        Mix.in_install_project(fn ->
+          # TODO: remove this once Mix requires Hex with the fix from
+          # https://github.com/hexpm/hex/pull/1015
+          # Context: Mix.install/1 starts :hex if necessary and stops
+          # it afterwards. Calling compile here may require hex to be
+          # started and that should happen automatically, but because
+          # of a bug it is not (fixed in the linked PR).
+          _ = Application.ensure_all_started(:hex)
 
-      {result, _} = Mix.Task.run("compile", args)
-      result
-    else
-      IO.puts(IEx.color(:eval_error, "Mix is not running. Please start IEx with: iex -S mix"))
-      :error
+          do_recompile(options)
+          # Just as with Mix.install/2 we clear all task invocations,
+          # so that we can recompile the dependencies again next time
+          Mix.Task.clear()
+          :ok
+        end)
+
+      true ->
+        project = Mix.Project.get()
+
+        if is_nil(project) or
+             project.__info__(:compile)[:source] == String.to_charlist(Path.absname("mix.exs")) do
+          do_recompile(options)
+        else
+          message = "Cannot recompile because the current working directory changed"
+          IO.puts(IEx.color(:eval_error, message))
+        end
     end
+  end
+
+  defp do_recompile(options) do
+    config = Mix.Project.config()
+    consolidation = Mix.Project.consolidation_path(config)
+    reenable_tasks(config)
+
+    force? = Keyword.get(options, :force, false)
+    args = ["--purge-consolidation-path-if-stale", "--return-errors", consolidation]
+    args = if force?, do: ["--force" | args], else: args
+
+    {result, _} = Mix.Task.run("compile", args)
+    result
   end
 
   defp mix_started? do
@@ -974,6 +1021,14 @@ defmodule IEx.Helpers do
   end
 
   @doc """
+  A shortcut for `continue/0`.
+  """
+  @doc since: "1.17.0"
+  def c do
+    continue()
+  end
+
+  @doc """
   Sets up a breakpoint in the AST of shape `Module.function/arity`
   with the given number of `stops`.
 
@@ -1073,7 +1128,7 @@ defmodule IEx.Helpers do
   end
 
   @doc """
-  Sets the number of pending stops in the breakpoint
+  Resets the number of pending stops in the breakpoint
   with the given `id` to zero.
 
   Returns `:ok` if there is such breakpoint ID. `:not_found`
@@ -1087,7 +1142,7 @@ defmodule IEx.Helpers do
   defdelegate reset_break(id), to: IEx.Pry
 
   @doc """
-  Sets the number of pending stops in the given module,
+  Resets the number of pending stops in the given module,
   function and arity to zero.
 
   If the module is not instrumented or if the given function
@@ -1326,6 +1381,7 @@ defmodule IEx.Helpers do
       #PID<0.0.0>
 
   """
+  @spec pid(binary | atom) :: pid()
   def pid("#PID<" <> string) do
     :erlang.list_to_pid(~c"<#{string}")
   end
@@ -1353,6 +1409,7 @@ defmodule IEx.Helpers do
       #PID<0.64.2048>
 
   """
+  @spec pid(non_neg_integer, non_neg_integer, non_neg_integer) :: pid()
   def pid(x, y, z)
       when is_integer(x) and x >= 0 and is_integer(y) and y >= 0 and is_integer(z) and z >= 0 do
     :erlang.list_to_pid(
@@ -1372,6 +1429,7 @@ defmodule IEx.Helpers do
 
   """
   @doc since: "1.8.0"
+  @spec port(binary) :: port()
   def port(string) when is_binary(string) do
     :erlang.list_to_port(~c"#Port<#{string}>")
   end
@@ -1388,6 +1446,7 @@ defmodule IEx.Helpers do
 
   """
   @doc since: "1.8.0"
+  @spec port(non_neg_integer, non_neg_integer) :: port()
   def port(major, minor)
       when is_integer(major) and major >= 0 and is_integer(minor) and minor >= 0 do
     :erlang.list_to_port(
@@ -1405,6 +1464,7 @@ defmodule IEx.Helpers do
 
   """
   @doc since: "1.6.0"
+  @spec ref(binary) :: reference()
   def ref(string) when is_binary(string) do
     :erlang.list_to_ref(~c"#Ref<#{string}>")
   end
@@ -1419,6 +1479,7 @@ defmodule IEx.Helpers do
 
   """
   @doc since: "1.6.0"
+  @spec ref(non_neg_integer, non_neg_integer, non_neg_integer, non_neg_integer) :: reference()
   def ref(w, x, y, z)
       when is_integer(w) and w >= 0 and is_integer(x) and x >= 0 and is_integer(y) and y >= 0 and
              is_integer(z) and z >= 0 do

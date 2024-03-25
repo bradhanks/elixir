@@ -167,6 +167,8 @@ iex> !nil
 true
 ```
 
+Similarly, values like `0` and `""`, which some other programming languages consider to be "falsy", are also "truthy" in Elixir.
+
 ## Atoms
 
 An atom is a constant whose value is its own name. Some other languages call these symbols. They are often useful to enumerate over distinct values, such as:
@@ -227,7 +229,7 @@ Elixir also supports string interpolation:
 ```elixir
 iex> string = "world"
 iex> "hello #{string}!"
-"hello world"
+"hello world!"
 ```
 
 String concatenation requires both sides to be strings but interpolation supports any data type that may be converted to a string:
@@ -325,6 +327,6 @@ iex> 1 === 1.0
 false
 ```
 
-The comparison operators in Elixir can compare across any data type. We say these operators perform _structural comparison_. For more information, you can read our documentation on [Structural vs Semantic comparisons](Kernel.html#module-structural-comparison).
+The comparison operators in Elixir can compare across any data type. We say these operators perform _structural comparison_. For more information, you can read our documentation on [Structural vs Semantic comparisons](`Kernel#module-structural-comparison`).
 
 Elixir also provides data-types for expressing collections, such as lists and tuples, which we learn next. When we talk about concurrency and fault-tolerance via processes, we will also discuss ports, pids, and references, but that will come on later chapters. Let's move forward.

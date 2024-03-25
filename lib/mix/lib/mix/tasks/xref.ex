@@ -71,10 +71,16 @@ defmodule Mix.Tasks.Xref do
 
   ## mix xref graph
 
-  Prints a file dependency graph where an edge from `A` to `B` indicates
+  Emits a file dependency graph where an edge from `A` to `B` indicates
   that `A` (source) depends on `B` (sink).
 
       $ mix xref graph --format stats
+
+  For any non-small project, the output of `mix xref graph` itself, without
+  any additional flags, is not useful: once your project grows, it is hard
+  to gather actionable feedback by looking at the graph as a whole. Instead,
+  `mix xref graph` is better used as a "database", which can help you answer
+  queries about your project.
 
   The following options are accepted:
 
@@ -129,7 +135,7 @@ defmodule Mix.Tasks.Xref do
       * `dot` - produces a DOT graph description in `xref_graph.dot` in the
         current directory. Warning: this will override any previously generated file
 
-    * `--output` (since v1.15.0) - can be set to one of
+    * `--output` *(since v1.15.0)* - can be set to one of
 
       * `-` - prints the output to standard output;
 
@@ -1003,10 +1009,12 @@ defmodule Mix.Tasks.Xref do
   end
 
   defp cycles(graph, opts) do
+    # Vertices order in cyclic_strong_components/1 return is arbitrary and changes between
+    # OTP versions, sorting is necessary to make the output stable across versions.
     cycles =
       graph
       |> :digraph_utils.cyclic_strong_components()
-      |> Enum.reduce([], &inner_cycles(graph, &1, &2))
+      |> Enum.reduce([], &inner_cycles(graph, Enum.sort(&1), &2))
       |> Enum.map(&{length(&1), &1})
 
     if min = opts[:min_cycle_size], do: Enum.filter(cycles, &(elem(&1, 0) > min)), else: cycles

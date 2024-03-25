@@ -291,7 +291,7 @@ defmodule Mix do
   then `mix cmd` to execute a command line shell script. This shows how
   powerful aliases mixed with Mix tasks can be.
 
-  One commit pitfall of aliases comes when trying to invoke the same task
+  One common pitfall of aliases comes when trying to invoke the same task
   multiple times. Mix tasks are designed to run only once. This prevents
   the same task from being executed multiple times. For example, if there
   are several tasks depending on `mix compile`, the code will be compiled
@@ -349,10 +349,8 @@ defmodule Mix do
     * `MIX_HOME` - path to Mix's home directory, stores configuration files and scripts used by Mix
       (default: `~/.mix`)
 
-    * `MIX_INSTALL_DIR` - (since v1.12.0) specifies directory where `Mix.install/2` keeps
+    * `MIX_INSTALL_DIR` *(since v1.12.0)* - specifies directory where `Mix.install/2` keeps
        install cache
-
-    * `MIX_INSTALL_FORCE` - (since v1.13.0) runs `Mix.install/2` with empty install cache
 
     * `MIX_PATH` - appends extra code paths
 
@@ -379,6 +377,8 @@ defmodule Mix do
   """
 
   @mix_install_project __MODULE__.InstallProject
+  @mix_install_app :mix_install
+  @mix_install_app_string Atom.to_string(@mix_install_app)
 
   use Application
 
@@ -677,23 +677,23 @@ defmodule Mix do
     * `:elixir` - if set, ensures the current Elixir version matches the given
       version requirement (Default: `nil`)
 
-    * `:system_env` (since v1.13.0) - a list or a map of system environment variable
+    * `:system_env` *(since v1.13.0)* - a list or a map of system environment variable
       names with respective values as binaries. The system environment is made part
       of the `Mix.install/2` cache, so different configurations will lead to different apps
 
-    * `:config` (since v1.13.0) - a keyword list of keyword lists of compile-time
+    * `:config` *(since v1.13.0)* - a keyword list of keyword lists of compile-time
       configuration. The configuration is part of the `Mix.install/2` cache, so
       different configurations will lead to different apps. For this reason, you
       want to minimize the amount of configuration set through this option.
       Use `Application.put_all_env/2` for setting other runtime configuration.
 
-    * `:config_path` (since v1.14.0) - path to a configuration file. If a `runtime.exs`
+    * `:config_path` *(since v1.14.0)* - path to a configuration file. If a `runtime.exs`
       file exists in the same directory as the given path, it is loaded too.
 
-    * `:lockfile` (since v1.14.0) - path to a lockfile to be used as a basis of
+    * `:lockfile` *(since v1.14.0)* - path to a lockfile to be used as a basis of
       dependency resolution.
 
-    * `:start_applications` (since v1.15.3) - if `true`, ensures that installed app
+    * `:start_applications` *(since v1.15.3)* - if `true`, ensures that installed app
       and its dependencies are started after install (Default: `true`)
 
   ## Examples
@@ -760,7 +760,7 @@ defmodule Mix do
   it executes the code. This means that, by the time Elixir tries to expand
   the `%Decimal{}` struct, the dependency has not been installed yet.
 
-  Luckily this has a straightforward solution, which is move the code to
+  Luckily this has a straightforward solution, which is to move the code
   inside a module:
 
       Mix.install([:decimal])
@@ -776,6 +776,26 @@ defmodule Mix do
   The contents inside `defmodule` will only be expanded and executed
   after `Mix.install/2` runs, which means that any struct, macros,
   and imports will be correctly handled.
+
+  ## Environment variables
+
+  The `MIX_INSTALL_DIR` environment variable configures the directory that
+  caches all `Mix.install/2`. It defaults to the "mix/install" folder in the
+  default user cache of your operating system. You can use `install_project_dir/0`
+  to access the directory of an existing install (alongside other installs):
+
+      iex> Mix.install([])
+      iex> Mix.install_project_dir()
+
+  The `MIX_INSTALL_FORCE` is available since Elixir v1.13.0 and forces
+  `Mix.install/2` to discard any previously cached entry of the current install.
+
+  The `MIX_INSTALL_RESTORE_PROJECT_DIR` environment variable may be specified
+  since Elixir v1.16.2. It should point to a previous installation directory,
+  which can be obtained with `Mix.install_project_dir/0` (after calling `Mix.install/2`).
+  Using a restore dir may speed up the installation, since matching dependencies
+  do not need be refetched nor recompiled. This environment variable is ignored
+  if `:force` is enabled.
   """
   @doc since: "1.12.0"
   def install(deps, opts \\ [])
@@ -845,50 +865,49 @@ defmodule Mix do
         Application.put_all_env(config, persistent: true)
         System.put_env(system_env)
 
-        install_dir = install_dir(id)
+        install_project_dir = install_project_dir(id)
 
         if Keyword.fetch!(opts, :verbose) do
-          Mix.shell().info("Mix.install/2 using #{install_dir}")
+          Mix.shell().info("Mix.install/2 using #{install_project_dir}")
         end
 
         if force? do
-          File.rm_rf!(install_dir)
+          File.rm_rf!(install_project_dir)
         end
 
-        config = [
-          version: "0.1.0",
-          build_embedded: false,
-          build_per_environment: true,
-          build_path: "_build",
-          lockfile: "mix.lock",
-          deps_path: "deps",
+        dynamic_config = [
           deps: deps,
-          app: :mix_install,
-          erlc_paths: [],
-          elixirc_paths: [],
-          compilers: [],
           consolidate_protocols: consolidate_protocols?,
-          config_path: config_path,
-          prune_code_paths: false
+          config_path: config_path
         ]
+
+        config = install_project_config(dynamic_config)
 
         started_apps = Application.started_applications()
         :ok = Mix.ProjectStack.push(@mix_install_project, config, "nofile")
-        build_dir = Path.join(install_dir, "_build")
+        build_dir = Path.join(install_project_dir, "_build")
         external_lockfile = expand_path(opts[:lockfile], deps, :lockfile, "mix.lock")
 
         try do
           first_build? = not File.dir?(build_dir)
-          File.mkdir_p!(install_dir)
 
-          File.cd!(install_dir, fn ->
+          restore_dir = System.get_env("MIX_INSTALL_RESTORE_PROJECT_DIR")
+
+          if first_build? and restore_dir != nil and not force? do
+            File.cp_r(restore_dir, install_project_dir)
+            remove_dep(install_project_dir, @mix_install_app_string)
+          end
+
+          File.mkdir_p!(install_project_dir)
+
+          File.cd!(install_project_dir, fn ->
             if config_path do
               Mix.Task.rerun("loadconfig")
             end
 
             cond do
               external_lockfile ->
-                md5_path = Path.join(install_dir, "merge.lock.md5")
+                md5_path = Path.join(install_project_dir, "merge.lock.md5")
 
                 old_md5 =
                   case File.read(md5_path) do
@@ -899,7 +918,7 @@ defmodule Mix do
                 new_md5 = external_lockfile |> File.read!() |> :erlang.md5()
 
                 if old_md5 != new_md5 do
-                  lockfile = Path.join(install_dir, "mix.lock")
+                  lockfile = Path.join(install_project_dir, "mix.lock")
                   old_lock = Mix.Dep.Lock.read(lockfile)
                   new_lock = Mix.Dep.Lock.read(external_lockfile)
                   Mix.Dep.Lock.write(Map.merge(old_lock, new_lock), file: lockfile)
@@ -937,13 +956,22 @@ defmodule Mix do
             end
           end
 
-          Mix.State.put(:installed, id)
+          if restore_dir do
+            remove_leftover_deps(install_project_dir)
+          end
+
+          Mix.State.put(:installed, {id, dynamic_config})
           :ok
         after
           Mix.ProjectStack.pop()
+          # Clear all tasks invoked during installation, since there
+          # is no reason to keep this in memory. Additionally this
+          # allows us to rerun tasks for the dependencies later on,
+          # such as recompilation
+          Mix.Task.clear()
         end
 
-      ^id when not force? ->
+      {^id, _dynamic_config} when not force? ->
         :ok
 
       _ ->
@@ -969,7 +997,35 @@ defmodule Mix do
     Path.join(app_dir, relative_path)
   end
 
-  defp install_dir(cache_id) do
+  defp remove_leftover_deps(install_project_dir) do
+    build_lib_dir = Path.join([install_project_dir, "_build", "dev", "lib"])
+
+    deps = File.ls!(build_lib_dir)
+
+    loaded_deps =
+      for {app, _description, _version} <- Application.loaded_applications(),
+          into: MapSet.new(),
+          do: Atom.to_string(app)
+
+    # We want to keep :mix_install, but it has no application
+    loaded_deps = MapSet.put(loaded_deps, @mix_install_app_string)
+
+    for dep <- deps, not MapSet.member?(loaded_deps, dep) do
+      remove_dep(install_project_dir, dep)
+    end
+  end
+
+  defp remove_dep(install_project_dir, dep) do
+    build_lib_dir = Path.join([install_project_dir, "_build", "dev", "lib"])
+    deps_dir = Path.join(install_project_dir, "deps")
+
+    build_path = Path.join(build_lib_dir, dep)
+    File.rm_rf(build_path)
+    dep_path = Path.join(deps_dir, dep)
+    File.rm_rf(dep_path)
+  end
+
+  defp install_project_dir(cache_id) do
     install_root =
       System.get_env("MIX_INSTALL_DIR") ||
         Path.join(Mix.Utils.mix_cache(), "installs")
@@ -978,13 +1034,75 @@ defmodule Mix do
     Path.join([install_root, version, cache_id])
   end
 
+  defp install_project_config(dynamic_config) do
+    [
+      version: "0.1.0",
+      build_embedded: false,
+      build_per_environment: true,
+      build_path: "_build",
+      lockfile: "mix.lock",
+      deps_path: "deps",
+      app: @mix_install_app,
+      erlc_paths: [],
+      elixirc_paths: [],
+      compilers: [],
+      prune_code_paths: false
+    ] ++ dynamic_config
+  end
+
+  @doc false
+  def in_install_project(fun) do
+    case safe_get_installed() do
+      {id, dynamic_config} ->
+        config = install_project_config(dynamic_config)
+
+        install_project_dir = install_project_dir(id)
+
+        File.cd!(install_project_dir, fn ->
+          :ok = Mix.ProjectStack.push(@mix_install_project, config, "nofile")
+
+          try do
+            fun.()
+          after
+            Mix.ProjectStack.pop()
+          end
+        end)
+
+      nil ->
+        Mix.raise("trying to call Mix.in_install_project/1, but Mix.install/2 was never called")
+    end
+  end
+
+  @doc """
+  Returns the directory where the current `Mix.install/2` project
+  resides.
+  """
+  @doc since: "1.16.2"
+  @spec install_project_dir() :: Path.t() | nil
+  def install_project_dir() do
+    case safe_get_installed() do
+      {id, _dynamic_config} -> install_project_dir(id)
+      nil -> nil
+    end
+  end
+
   @doc """
   Returns whether `Mix.install/2` was called in the current node.
   """
   @doc since: "1.13.0"
   @spec installed?() :: boolean()
   def installed? do
-    Mix.State.get(:installed) != nil
+    safe_get_installed() != nil
+  end
+
+  defp safe_get_installed() do
+    if mix_started?() do
+      Mix.State.get(:installed)
+    end
+  end
+
+  defp mix_started?() do
+    Process.whereis(Mix.State) != nil
   end
 
   defp stop_apps([]), do: :ok

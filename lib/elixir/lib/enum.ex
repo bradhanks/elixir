@@ -80,7 +80,7 @@ defprotocol Enumerable do
 
   Returns the accumulator for the next enumeration step.
   """
-  @type reducer :: (element :: term, current_acc :: acc -> updated_acc :: acc)
+  @type reducer :: (element :: term, element_acc :: term -> acc)
 
   @typedoc """
   The result of the reduce operation.
@@ -261,7 +261,7 @@ defmodule Enum do
   traversed as if it was an enumerable.
 
   For a general overview of all functions in the `Enum` module, see
-  [the `Enum` cheatsheet](enum-cheat.html).
+  [the `Enum` cheatsheet](enum-cheat.cheatmd).
 
   The functions in this module work in linear time. This means that, the
   time it takes to perform an operation grows at the same rate as the length
@@ -1096,6 +1096,10 @@ defmodule Enum do
 
       iex> Enum.filter([1, 2, 3], fn x -> rem(x, 2) == 0 end)
       [2]
+      iex> Enum.filter(["apple", "pear", "banana"], fn fruit -> String.contains?(fruit, "a") end)
+      ["apple", "pear", "banana"]
+      iex> Enum.filter([4, 21, 24, 904], fn seconds -> seconds > 1000 end)
+      []
 
   Keep in mind that `filter` is not capable of filtering and
   transforming an element at the same time. If you would like
@@ -3809,9 +3813,6 @@ defmodule Enum do
       iex> Enum.unzip([{:a, 1}, {:b, 2}, {:c, 3}])
       {[:a, :b, :c], [1, 2, 3]}
 
-      iex> Enum.unzip(%{a: 1, b: 2})
-      {[:a, :b], [1, 2]}
-
   """
   @spec unzip(t) :: {[element], [element]}
 
@@ -3892,12 +3893,19 @@ defmodule Enum do
   Zips corresponding elements from two enumerables into a list
   of tuples.
 
+  Because a list of two-element tuples with atoms as the first
+  tuple element is a keyword list (`Keyword`), zipping a first list
+  of atoms with a second list of any kind creates a keyword list.
+
   The zipping finishes as soon as either enumerable completes.
 
   ## Examples
 
       iex> Enum.zip([1, 2, 3], [:a, :b, :c])
       [{1, :a}, {2, :b}, {3, :c}]
+
+      iex> Enum.zip([:a, :b, :c], [1, 2, 3])
+      [a: 1, b: 2, c: 3]
 
       iex> Enum.zip([1, 2, 3, 4, 5], [:a, :b, :c])
       [{1, :a}, {2, :b}, {3, :c}]
@@ -4067,7 +4075,7 @@ defmodule Enum do
       ...> end)
       [{1, 2, 3}, {1, 2, 3}]
 
-      iex> enums = [[1, 2], %{a: 3, b: 4}, [5, 6]]
+      iex> enums = [[1, 2], [a: 3, b: 4], [5, 6]]
       ...> Enum.zip_reduce(enums, [], fn elements, acc ->
       ...>   [List.to_tuple(elements) | acc]
       ...> end)

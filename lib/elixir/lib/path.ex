@@ -172,10 +172,16 @@ defmodule Path do
   Converts the path to an absolute one, expanding
   any `.` and `..` components and a leading `~`.
 
+  If a relative path is provided it is expanded relatively to
+  the current working directory.
+
   ## Examples
 
       Path.expand("/foo/bar/../baz")
       #=> "/foo/baz"
+
+      Path.expand("foo/bar/../baz")
+      #=> "$PWD/foo/baz"
 
   """
   @spec expand(t) :: binary
@@ -427,6 +433,8 @@ defmodule Path do
   defp relative_to_unforced(_, _, original), do: join(original)
 
   defp relative_to_forced(path, path, _original), do: "."
+  defp relative_to_forced(["."], _path, _original), do: "."
+  defp relative_to_forced(path, ["."], _original), do: join(path)
   defp relative_to_forced([h | t1], [h | t2], original), do: relative_to_forced(t1, t2, original)
 
   # this should only happen if we have two paths on different drives on windows
